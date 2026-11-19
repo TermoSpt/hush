@@ -705,7 +705,7 @@ function renderCtxBar() {
   const u = ctxUsage(chat);
   const pct = Math.min(100, (u.used / u.limit) * 100);
   bar.className = 'ctx-bar' + (u.used > u.limit ? ' bad' : pct > 85 ? ' warn' : '');
-  let label = `<span class="tok-help" tabindex="0" title="Tokens are the pieces a model reads and writes: short words, or parts of longer words. In English, 1 token ≈ 4 characters ≈ ¾ of a word. While you type, Hush estimates; after each reply it uses Ollama's exact count.">${u.exact ? '' : '≈ '}${fmtInt(u.used)} / ${fmtInt(u.limit)} tokens of memory used ⓘ</span>`;
+  let label = `<span class="tok-help" tabindex="0" title="Tokens are the pieces a model reads and writes: short words, or parts of longer words. In English, 1 token ≈ 4 characters ≈ ¾ of a word. While you type, Hush estimates; after each reply it uses Ollama's exact count.">${u.exact ? '' : '≈ '}${fmtInt(u.used)} / ${fmtInt(u.limit)} tokens of memory used<svg class="i-ic" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="6.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 7.2v4.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".95" fill="currentColor"/></svg></span>`;
   if (u.used > u.limit) label += ' · full: the oldest part of the chat is being forgotten';
   else if (pct > 85) label += ' · almost full';
   bar.innerHTML = `<span>${label}</span><span class="ctx-track"><span class="ctx-fill" style="width:${pct}%"></span></span>`;
@@ -1910,13 +1910,18 @@ async function shareAction(kind) {
 function toggleSharePop() {
   const pop = $('#share-pop');
   if (!pop.hidden) { pop.hidden = true; return; }
+  const chat = activeChat();
+  const has = !!chat && chat.messages.some((m) => !m.pending && !m.synthetic && m.content);
+  const busy = !!S.gen || !!S.bg;
+  const off = (cond) => (cond ? ' disabled' : '');
   pop.innerHTML = `<div class="sp-title">Take this chat elsewhere</div>
-    <button data-share="copy" type="button"><b>Copy whole chat</b><span>As plain text, to paste into any app or AI</span></button>
-    <button data-share="summary" type="button"><b>Summarize &amp; copy</b><span>Your local model writes a summary; nothing leaves your PC</span></button>
-    <button data-share="newchat" type="button"><b>Summarize into a new chat</b><span>Keep going here with a fresh memory</span></button>
+    ${has ? '' : '<div class="sp-empty">Nothing to share yet. Send a message first; these options unlock once the chat has content.</div>'}
+    <button data-share="copy" type="button"${off(!has)}><b>Copy whole chat</b><span>As plain text, to paste into any app or AI</span></button>
+    <button data-share="summary" type="button"${off(!has || busy)}><b>Summarize &amp; copy</b><span>${busy && has ? 'Available when the current answer finishes' : 'Your local model writes a summary; nothing leaves your PC'}</span></button>
+    <button data-share="newchat" type="button"${off(!has || busy)}><b>Summarize into a new chat</b><span>Keep going here with a fresh memory</span></button>
     <div class="sp-sep">For online assistants (Claude, ChatGPT, Gemini…)</div>
-    <button data-share="factcheck" type="button"><b>Copy for an online fact-check</b><span>Whole chat plus instructions to check every answer</span></button>
-    <button data-share="continue" type="button"><b>Copy to continue in another AI</b><span>Whole chat plus "carry on from here"</span></button>`;
+    <button data-share="factcheck" type="button"${off(!has)}><b>Copy for an online fact-check</b><span>Whole chat plus instructions to check every answer</span></button>
+    <button data-share="continue" type="button"${off(!has)}><b>Copy to continue in another AI</b><span>Whole chat plus "carry on from here"</span></button>`;
   pop.hidden = false;
 }
 

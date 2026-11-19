@@ -13,7 +13,7 @@ Hush sits on top of [Ollama](https://ollama.com) (which runs the models) and add
 - **Memory-full handling.** A banner warns when the conversation is about to outgrow the model's memory. It offers to **summarize into a new chat** (carrying the important parts forward) or to add more memory. Messages the model can no longer see are dimmed behind a clear "out of memory" line, and you're asked before sending a message that won't fit.
 - **Live progress.** While it works: loading, reading your prompt, thinking, answering, with a timer and tokens per second, and a plain explanation when it's slow.
 - **Live hardware strip.** GPU memory, load, temperature and the loaded model, always visible in the sidebar.
-- **Roles.** Ten built-in roles (developer, code reviewer, debugger, editor, explain-it-simply, translator, analyst, and more), plus your own saved roles. It warns when a role is too big for the memory setting.
+- **Roles.** 65 built-in roles in 7 categories: Everyday, Coding, Writing, Learning, Work & analysis, Creative, and Content & social (video scripts, Shorts/Reels, YouTube titles, podcasts, posts, newsletters…). You can also save your own. Each role is kept short so it uses little of the model's memory, and Hush warns when one is too big for the memory setting.
 - **Simple and Advanced tuning.** Simple: how much it remembers, style (Precise / Balanced / Creative), thinking on/off, role. Advanced adds every sampling control, cache type, GPU size and the Ollama address.
 - **Per-model settings.** "Remember for this model" makes every new chat with that model start with your memory, style and thinking setup.
 - **Context you can see.** A slider with a "Fit to GPU" button, plus a bar showing how full the conversation is, so you notice before Ollama silently cuts off the start.
@@ -60,7 +60,12 @@ Hush is meant to leave as much of your hardware as possible to the model:
 
 ### About the Windows "protected your PC" warning
 
-Windows SmartScreen warns about any program that isn't **code-signed** by a known publisher, however safe it is. Until Hush releases are signed, click **More info → Run anyway** once on the installer. After installing, start Hush from the Start menu; the warning belongs to the downloaded installer, not the installed app.
+Windows SmartScreen warns about any program that isn't **code-signed** by a known publisher ("Unknown publisher"), however safe it is. Until Hush releases are signed:
+
+- **On your own PC:** before running a downloaded installer, right-click it → **Properties** → tick **Unblock** → **OK**. That removes the "downloaded from the internet" mark Windows checks, so no warning appears. Only do this for files you trust. Installers you build yourself (`npm run build`) never carry the mark.
+- **Otherwise:** click **More info → Run anyway** once.
+
+After installing, start Hush from the Start menu.
 
 The proper fix for everyone who downloads Hush is signing the releases:
 - **SignPath Foundation** gives qualifying open-source projects a free code-signing certificate, built from the public GitHub repository (used by projects like Notepad++ and WinSCP). Hush is MIT-licensed, so it can apply.

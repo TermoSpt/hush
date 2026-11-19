@@ -1,7 +1,7 @@
 {
   "name": "hush",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Private, offline-first desktop app for local AI models (Ollama)",
   "license": "MIT",
   "scripts": {

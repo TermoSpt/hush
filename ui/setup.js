@@ -24,9 +24,17 @@ const SETUP_ITEMS = [
     choices: [['1', '1'], ['2', '2'], ['', 'Ollama default']],
     why: 'With 1, switching models (or using another model for Review) swaps the old one out instead of squeezing two into graphics memory. On cards up to 16 GB, 1 is safest. With 24 GB or more, 2 lets you switch instantly.' },
   { name: 'OLLAMA_NOHISTORY', title: 'Terminal prompt history', rec: '1',
-    choices: [['1', 'Off (not saved)'], ['', 'On (Ollama default)']],
+    choices: [['1', 'Off'], ['', 'On (Ollama default)']],
     why: '`ollama run` in a terminal saves everything you type to a plain-text file (~/.ollama/history). Off is better for privacy. This doesn\'t affect Hush.' },
 ];
+// Recommendations depend on the card: big cards can afford speed over memory savings.
+function cardGB() { const b = vramBudget(); return b ? b.total / 1073741824 : 12; }
+function recFor(it) {
+  const gb = cardGB();
+  if (it.name === 'OLLAMA_KV_CACHE_TYPE') return gb >= 20 ? 'f16' : 'q8_0';
+  if (it.name === 'OLLAMA_MAX_LOADED_MODELS') return gb >= 20 ? '2' : '1';
+  return it.rec;
+}
 const norm = (name, v) => (name === 'OLLAMA_NOHISTORY' || name === 'OLLAMA_FLASH_ATTENTION' ? (v === 'true' ? '1' : v === 'false' ? '0' : v || '') : v || '');
 
 async function loadEnv() {
@@ -78,11 +86,12 @@ async function renderSetupSheet() {
   html += '<h3 style="display:flex;justify-content:space-between;align-items:center;gap:8px">Ollama performance &amp; privacy settings <span style="display:flex;gap:6px"><button class="btn small ghost" id="sc-reset" type="button">Reset all to Ollama defaults</button><button class="btn small primary" id="sc-all" type="button">Apply all recommended</button></span></h3>';
   for (const it of SETUP_ITEMS) {
     const v = norm(it.name, ENV[it.name]);
-    const good = v === it.rec;
-    const seg = `<div class="seg-ctl sc-seg">${it.choices.map(([val, label]) => `<button type="button" data-env="${it.name}" data-val="${val}" class="${val === v ? 'on' : ''}">${esc(label)}${val === it.rec ? ' ★' : ''}</button>`).join('')}</div>`;
-    html += row(good ? true : null, esc(it.title), `${esc(it.why)} <span class="mono">${it.name}</span>${seg}`);
+    const rec = recFor(it);
+    const good = v === rec;
+    const seg = `<div class="seg-ctl sc-seg">${it.choices.map(([val, label]) => `<button type="button" data-env="${it.name}" data-val="${val}" class="${val === v ? 'on' : ''}${val === rec ? ' rec' : ''}">${esc(label)}${val === rec ? ' <em>(Recommended)</em>' : ''}</button>`).join('')}</div>`;
+    html += row(good ? true : null, esc(it.title), `<div class="sc-why">${esc(it.why)}</div><div class="sc-env">Ollama setting: <span class="mono">${it.name}</span></div>${seg}`);
   }
-  html += '<p class="def">★ = recommended for one person on a typical gaming PC.</p>';
+  html += `<p class="def">"Recommended" is worked out for this PC: ${g ? esc(g.name) : 'your graphics card'} with ${cardGB().toFixed(0)} GB of graphics memory, used by one person.</p>`;
   const ctxEnv = ENV.OLLAMA_CONTEXT_LENGTH;
   html += row(null, `Default context length: ${ctxEnv ? fmtInt(ctxEnv) : 'not set'}`, 'Hush sends the context size for every chat itself (Tune → "How much it remembers"), so you don\'t need this setting. It only affects other apps and the terminal.');
   const kaEnv = ENV.OLLAMA_KEEP_ALIVE;
@@ -192,7 +201,7 @@ if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded
       await detectOllamaEnv(); renderSetupSheet();
     } else if (b.id === 'sc-all') {
       let n = 0;
-      for (const it of SETUP_ITEMS) if (norm(it.name, ENV[it.name]) !== it.rec && await applyEnv(it.name, it.rec)) n++;
+      for (const it of SETUP_ITEMS) if (norm(it.name, ENV[it.name]) !== recFor(it) && await applyEnv(it.name, recFor(it))) n++;
       if (n) toast(`${n} setting${n > 1 ? 's' : ''} saved. Restart Ollama to apply.`, 'ok');
       else toast('Everything is already set as recommended.');
       await detectOllamaEnv();

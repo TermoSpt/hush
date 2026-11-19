@@ -221,8 +221,13 @@ function renderBenchSheet() {
   </details>
   <h3>Your own questions <span class="def" style="font-weight:400">(optional)</span></h3>
   <div class="custom-q">
-    ${(S.prefs.customBench || []).map((c) => `<div class="cq-row"><span>${esc(c.prompt)}</span><span class="def">must contain: ${esc(c.expect)}</span><button class="linkish danger" data-cq-del="${esc(c.id)}" type="button">remove</button></div>`).join('')}
-    <div class="cq-add"><input id="cq-prompt" placeholder="Question, e.g. What port does PostgreSQL use by default?"><input id="cq-expect" placeholder="Correct if it contains… e.g. 5432  (| means or)"><button class="btn small" id="cq-add" type="button">Add</button></div>
+    ${(S.prefs.customBench || []).map((c) => `<div class="cq-row"><span>${esc(c.prompt)}</span><span class="def">correct if it contains: <b>${esc(c.expect)}</b></span><button class="linkish danger" data-cq-del="${esc(c.id)}" type="button">remove</button></div>`).join('')}
+    <div class="cq-form">
+      <label><span>1 · The question to ask every model</span><input id="cq-prompt" placeholder="e.g. What port does PostgreSQL use by default?"></label>
+      <label><span>2 · The answer counts as correct if it contains</span><input id="cq-expect" placeholder="e.g. 5432"></label>
+      <button class="btn small primary" id="cq-add" type="button">Add question</button>
+    </div>
+    <p class="def">You write the question and the key word or number a right answer must include; Hush checks each model's reply for it (capital letters don't matter). Several acceptable answers? Separate them with <span class="mono">|</span>, e.g. <span class="mono">Canberra | Kanbra</span>. Your questions are added to the end of the test.</p>
   </div>
   <h3>Run the test</h3>
   <div class="bench-models">${models.map((m) => `<label class="bm"><input type="checkbox" value="${esc(m.name)}"${S.prefs.bench && S.prefs.bench[m.name] ? '' : ' checked'}> <span>${esc(m.name)}</span>${capabilities(m.name).includes('thinking') ? '<span class="chip">thinks</span>' : ''}${fitChip(m.name)}</label>`).join('') || '<p>No models installed.</p>'}</div>
@@ -261,6 +266,9 @@ function renderBenchSheet() {
 }
 
 if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded', () => {
+  $('#sheet-body').addEventListener('keydown', (e) => {
+    if ($('#sheet').dataset.kind === 'bench' && e.key === 'Enter' && (e.target.id === 'cq-prompt' || e.target.id === 'cq-expect')) { e.preventDefault(); $('#cq-add').click(); }
+  });
   $('#sheet-body').addEventListener('click', async (e) => {
     if ($('#sheet').dataset.kind !== 'bench') return;
     const b = e.target.closest('button');
@@ -339,7 +347,10 @@ async function reviewMessage(chat, idx, again = false) {
   const prompt = `Review the ANSWER to the QUESTION below.\n\nQUESTION:\n${question}\n\nANSWER:\n${answer.slice(0, 12000)}\n\nReply in exactly this format:\nVerdict: Correct / Mostly correct / Partly wrong / Wrong / Can't verify\nProblems:\n- each specific false, made-up or unsupported claim, with the correction (or "None found")\nConfidence: low / medium / high, with one short reason\nKeep it brief.`;
   m.review = { judge, text: '', thinking: '', pending: true };
   renderMessages(false);
-  const update = () => { const el = $(`[data-review="${m.id}"]`); if (el) el.outerHTML = reviewHtml(m); };
+  const draw = () => { const el = $(`[data-review="${m.id}"]`); if (el) el.outerHTML = reviewHtml(m); };
+  // Redraw at most ~8 times a second, however fast tokens arrive.
+  let timer = null;
+  const update = () => { if (!timer) timer = setTimeout(() => { timer = null; draw(); }, 120); };
   try {
     const r = await benchAsk(judge, '', false, {
       messages: [{ role: 'system', content: JUDGE_SYSTEM }, { role: 'user', content: prompt }],
@@ -358,7 +369,8 @@ async function reviewMessage(chat, idx, again = false) {
     m.review.error = errText(e);
   } finally {
     m.review.pending = false;
-    update();
+    clearTimeout(timer);
+    draw();
     persist();
   }
 }

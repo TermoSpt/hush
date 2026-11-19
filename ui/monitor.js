@@ -5,7 +5,7 @@
 'use strict';
 /* global S, $, esc, fmtInt, Backend, toast, errText, refreshPs, renderGauge, renderHardware, activeChat, loadedEntry, unloadIn, overflowState, overflowGB, Est */
 
-const MON = { samples: [], hover: null, lastTok: null };
+const MON = { samples: [], rates: [], tokHist: [], tokT0: null, gpuAt: 0, hover: null };
 const MON_WINDOW = 120000; // 2 minutes
 
 // The chat answer being written, or a background job (Review, Test models, summary).
@@ -18,30 +18,43 @@ function currentGenLive() {
   return S.bg || null;
 }
 
+// Graphics-card readings arrive whenever nvidia-smi answers (it can lag when the card is busy).
 function recordMonitorSample() {
   const g = S.gpu[0];
   if (!g) return;
   const now = Date.now();
-  const L = currentGenLive();
-  let rate = null;
-  let phase = 'idle';
-  if (L) {
-    const tok = L.thinkTok + L.ansTok;
-    phase = L.ansTok ? 'answering' : L.thinkTok ? 'thinking' : 'reading';
-    if (MON.lastTok && MON.lastTok.t0 === L.t0) {
-      const dt = (now - MON.lastTok.at) / 1000;
-      if (dt > 0.3) rate = Math.max(0, (tok - MON.lastTok.tok) / dt);
-    }
-    MON.lastTok = { t0: L.t0, tok, at: now };
-  } else MON.lastTok = null;
+  MON.gpuAt = now;
   MON.samples.push({
-    t: now, phase, rate,
+    t: now,
     util: g.util_pct ?? null, memu: g.mem_util_pct ?? null,
     vram: g.used_mb / 1024, total: g.total_mb / 1024,
     temp: g.temp_c ?? null, power: g.power_w ?? null,
   });
   while (MON.samples.length && now - MON.samples[0].t > MON_WINDOW + 5000) MON.samples.shift();
-  if (!$('#monitor').hidden) renderMonitor();
+}
+
+// Model speed has its own steady 1-second clock, computed from token counts, so it
+// never freezes or dips just because a graphics-card reading is late.
+function monTick() {
+  const open = !$('#monitor').hidden;
+  const L = currentGenLive();
+  const now = Date.now();
+  if (!L) {
+    MON.tokHist = [];
+    if (MON.rates.length && MON.rates[MON.rates.length - 1].rate !== null) MON.rates.push({ t: now, rate: null, phase: 'idle' });
+  } else {
+    const tok = L.thinkTok + L.ansTok;
+    if (MON.tokT0 !== L.t0) { MON.tokHist = []; MON.tokT0 = L.t0; }
+    MON.tokHist.push({ at: now, tok });
+    while (MON.tokHist.length > 1 && now - MON.tokHist[0].at > 2500) MON.tokHist.shift();
+    const first = MON.tokHist[0];
+    const dt = (now - first.at) / 1000;
+    const rate = dt >= 0.9 ? Math.max(0, (tok - first.tok) / dt) : null;
+    const phase = L.ansTok ? 'answering' : L.thinkTok ? 'thinking' : 'reading';
+    MON.rates.push({ t: now, rate: phase === 'reading' ? 0 : rate, phase, label: L.label || '' });
+  }
+  while (MON.rates.length && now - MON.rates[0].t > MON_WINDOW + 5000) MON.rates.shift();
+  if (open) renderMonitor();
 }
 
 function niceMax(v) {
@@ -51,11 +64,11 @@ function niceMax(v) {
   return 10 * p;
 }
 
-function chartHtml(key, title, fmt, get, fixedMax) {
+function chartHtml(key, title, fmt, get, fixedMax, series = MON.samples) {
   const now = Date.now();
   const W = 300;
   const H = 64;
-  const pts = MON.samples.map((s) => ({ t: s.t, v: get(s), s })).filter((p) => p.v !== null && p.v !== undefined && !Number.isNaN(p.v));
+  const pts = series.map((s) => ({ t: s.t, v: get(s), s })).filter((p) => p.v !== null && p.v !== undefined && !Number.isNaN(p.v));
   const latest = pts.length ? pts[pts.length - 1].v : null;
   const max = fixedMax || niceMax(Math.max(1, ...pts.map((p) => p.v)) * 1.1);
   const x = (t) => ((t - (now - MON_WINDOW)) / MON_WINDOW) * W;
@@ -76,7 +89,7 @@ function chartHtml(key, title, fmt, get, fixedMax) {
     let best = pts[0];
     for (const p of pts) if (Math.abs(p.t - ht) < Math.abs(best.t - ht)) best = p;
     const left = Math.max(0, Math.min(100, (x(best.t) / W) * 100));
-    hover = `<span class="ch-cross" style="left:${left}%"></span><span class="ch-tip" style="left:${Math.min(left, 62)}%"><b>${esc(fmt(best.v))}</b> · ${Math.round((now - best.t) / 1000)} s ago${best.s.phase !== 'idle' ? ` · ${best.s.phase}` : ''}</span>`;
+    hover = `<span class="ch-cross" style="left:${left}%"></span><span class="ch-tip" style="left:${Math.min(left, 62)}%"><b>${esc(fmt(best.v))}</b> · ${Math.round((now - best.t) / 1000)} s ago${best.s.phase && best.s.phase !== 'idle' ? ` · ${best.s.phase}` : ''}</span>`;
   }
   return `<div class="chart" data-chart="${key}"><div class="ch-head"><span>${esc(title)}</span><b>${latest === null ? '–' : esc(fmt(latest))}</b></div>
     <div class="ch-plot" data-chart="${key}"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
@@ -123,7 +136,7 @@ function renderMonitor() {
     return;
   }
   const L = currentGenLive();
-  const last = MON.samples[MON.samples.length - 1] || {};
+  const last = MON.rates[MON.rates.length - 1] || {};
   const lr = lastReplyStats();
   const lastWrite = lr && lr.st.eval_count && lr.st.eval_duration ? lr.st.eval_count / (lr.st.eval_duration / 1e9) : null;
   const ps = S.ps;
@@ -142,8 +155,9 @@ function renderMonitor() {
   html += tile('Temperature', g.temp_c ? `${g.temp_c}<small>°C</small>` : '–', g.fan_pct !== null && g.fan_pct !== undefined ? `fan ${g.fan_pct}%` : '', 'Most cards start slowing down above roughly 83–87°C.');
   html += tile('Power', g.power_w ? `${Math.round(g.power_w)}<small> W</small>` : '–', g.power_limit_w ? `of ${Math.round(g.power_limit_w)} W limit` : '', 'Electrical power the card draws right now.');
   html += '</div>';
+  if ((L || S.gen || S.bg) && Date.now() - MON.gpuAt > 4000) html += '<div class="note">Graphics-card readings are a few seconds behind: the card is very busy, and Windows answers hardware queries slowly then. Model speed above is still live.</div>';
   for (const [kind, text] of diagnosis(g)) html += `<div class="note ${kind === 'ok' ? 'good' : kind}">${esc(text)}</div>`;
-  html += chartHtml('rate', 'Writing speed', (v) => `${v.toFixed(0)} tok/s`, (s) => s.rate);
+  html += chartHtml('rate', 'Model speed (thinking + writing)', (v) => `${v.toFixed(0)} tok/s`, (s) => s.rate, 0, MON.rates);
   html += chartHtml('util', 'Compute', (v) => `${Math.round(v)}%`, (s) => s.util, 100);
   html += chartHtml('vram', 'Graphics memory', (v) => `${v.toFixed(1)} GB`, (s) => s.vram, Math.ceil(g.total_mb / 1024));
   html += chartHtml('power', 'Power', (v) => `${Math.round(v)} W`, (s) => s.power, g.power_limit_w ? niceMax(g.power_limit_w) : 0);
@@ -193,6 +207,7 @@ function toggleMonitor(force) {
 }
 
 if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded', () => {
+  setInterval(monTick, 1000);
   const body = $('#mon-body');
   body.addEventListener('mousemove', (e) => {
     if (!e.target.closest('#mon-live')) return;

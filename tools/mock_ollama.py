@@ -238,7 +238,7 @@ class H(BaseHTTPRequestHandler):
                 tokens = [text[i:i + 4] for i in range(0, len(text), 4)]
                 for t in tokens:
                     self.chunk({"model": name, "message": {"role": "assistant", "content": t}, "done": False})
-                    time.sleep(0.004 if len(tokens) < 40 else 0.012)
+                    time.sleep(0.06 if "Review the ANSWER" in last else (0.004 if len(tokens) < 40 else 0.012))
                 prompt_tokens = sum(len(m.get("content", "")) for m in msgs) // 4 + 20
                 self.chunk({"model": name, "message": {"role": "assistant", "content": ""}, "done": True,
                             "done_reason": "stop", "total_duration": 3_000_000_000, "load_duration": load,

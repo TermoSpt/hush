@@ -519,3 +519,24 @@ button.rv-badge { cursor: pointer; }
 @media (max-width: 1100px) { .how-grid { grid-template-columns: 1fr 1fr; } .bench-sum { grid-template-columns: 1fr; } }
 .sc-seg { display: inline-flex; max-width: 100%; }
 .bm span:first-of-type { white-space: nowrap; min-width: 0; }
+
+/* ---------- v0.6 additions ---------- */
+.share-pop button:disabled { opacity: .38; cursor: not-allowed; }
+.share-pop button:disabled:hover { background: none; }
+.sp-empty { font-size: 12px; color: var(--warn); padding: 4px 10px 8px; }
+.sc-why { margin-bottom: 6px; }
+.sc-env { font-size: 11.5px; color: var(--faint); margin-bottom: 10px; }
+.sc-seg { margin-top: 0; gap: 4px; }
+.sc-seg button { padding: 6px 10px; }
+.sc-seg button em { font-style: normal; color: var(--ok); font-size: 11.5px; margin-left: 2px; }
+.sc-seg button.on em { color: var(--ok); }
+.sc-main { flex: 1; }
+.sc-row { padding: 14px 0; }
+.i-ic { display: inline-block; vertical-align: -2px; margin-left: 5px; color: var(--faint); }
+.tok-help { border-bottom: 0; display: inline-flex; align-items: center; }
+.tok-help:hover .i-ic, .tok-help:focus .i-ic { color: var(--text); }
+.cq-form { display: grid; grid-template-columns: 1.3fr 1fr auto; gap: 10px; align-items: end; margin-top: 4px; }
+.cq-form label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); min-width: 0; }
+.cq-form input { background: var(--bg); border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.cq-form .btn { height: 36px; }
+@media (max-width: 1100px) { .cq-form { grid-template-columns: 1fr; } }
