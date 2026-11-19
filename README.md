@@ -72,10 +72,6 @@ python -m http.server -d ui 8765
 
 In a normal browser the UI runs in "dev mode": it talks to Ollama directly and uses a fake, **unencrypted** in-memory vault.
 
-### Releasing
-
-Push a tag (`git tag v0.1.0 && git push --tags`). GitHub Actions builds Windows, macOS and Linux installers and attaches them to a draft release.
-
 ## Layout
 
 ```
