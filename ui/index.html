@@ -16,7 +16,9 @@
     <button id="new-chat" class="btn primary wide" type="button">New chat <kbd>Ctrl N</kbd></button>
     <div id="chat-list" class="chat-list"></div>
     <nav class="side-nav">
+      <button class="nav-btn" data-open="setup" type="button">Setup check</button>
       <button class="nav-btn" data-open="models" type="button">Models</button>
+      <button class="nav-btn" data-open="bench" type="button">Test models</button>
       <button class="nav-btn" data-open="privacy" type="button">Privacy &amp; data</button>
       <button class="nav-btn" data-open="guide" type="button">How tuning works</button>
       <button id="wipe-btn" class="nav-btn danger" type="button" title="Ctrl+Shift+L">Wipe session</button>
@@ -40,9 +42,10 @@
 
     <footer id="composer">
       <div id="ctx-bar" class="ctx-bar"></div>
+      <div id="attach-pop" class="attach-pop" hidden></div>
       <div id="attachments" class="attachments"></div>
       <div class="input-row">
-        <button id="attach-btn" class="icon-btn" type="button" title="Attach files (or drag and drop, or paste a screenshot)">+</button>
+        <button id="attach-btn" class="icon-btn" type="button" title="Attach files: see what's supported"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
         <input id="file-input" type="file" multiple hidden>
         <textarea id="input" rows="1" placeholder="Message…  (Shift+Enter for a new line · paste or drop files)"></textarea>
         <button id="send-btn" class="btn primary" type="button">Send</button>
@@ -69,12 +72,16 @@
 </div>
 <div id="gate" class="gate" hidden></div>
 <div id="modal" class="modal" hidden><div class="modal-card" id="modal-card"></div></div>
-<div id="drop" class="drop" hidden><div>Drop files to attach<small>Images go to vision models. Text, code and PDFs are added to your message.</small></div></div>
+<div id="drop" class="drop" hidden><div>Drop files to attach<small>Images (for vision models) · PDF · Word · Excel · PowerPoint · text, data and code files</small></div></div>
 <div id="toasts" class="toasts"></div>
 
 <script src="markdown.js"></script>
 <script src="estimate.js"></script>
 <script src="backend.js"></script>
+<script src="office.js"></script>
+<script src="roles.js"></script>
 <script src="app.js"></script>
+<script src="bench.js"></script>
+<script src="setup.js"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 'use strict';
-/* global MD, Est, Backend */
+/* global MD, Est, Backend, Office, ROLE_CATS, PRESETS, renderBenchSheet, renderSetupSheet, reviewMessage, factCheckMessage, reviewHtml, detectOllamaEnv, modelsExtrasHtml, updateCalc, fillStorage, loadEnv, ENV */
 
 // =====================================================================
 // helpers
@@ -88,29 +88,6 @@ const DEFAULT_PREFS = {
   modelProfiles: {},     // model -> { num_ctx, temperature, ... }
 };
 
-// Built-in roles. `style` sets sampling; everything else stays on the model's own defaults.
-const PRESETS = [
-  { id: 'assistant', name: 'General assistant', style: 'balanced',
-    system: 'You are a helpful, precise assistant. Answer directly first, then add detail only if it helps. If you are not sure, say so instead of guessing.' },
-  { id: 'developer', name: 'Senior developer', style: 'precise',
-    system: 'You are a senior software engineer. Give working, idiomatic code with brief explanations. Point out edge cases, security issues and performance pitfalls. Ask for missing details only when they block a correct answer.' },
-  { id: 'reviewer', name: 'Code reviewer', style: 'precise',
-    system: 'Review the code the user provides. List concrete problems ordered by severity (bugs, security, correctness, then readability). For each, quote the line or snippet and suggest a fix. Do not rewrite the whole file unless asked.' },
-  { id: 'debugger', name: 'Debugging partner', style: 'precise',
-    system: 'Help find the root cause of bugs. If the exact error message, the relevant code or the expected behaviour is missing, ask for it. Reason step by step about likely causes, rank them by probability, and give the quickest check for each.' },
-  { id: 'editor', name: 'Writing editor', style: 'balanced',
-    system: "Edit the user's text for clarity, grammar and flow while keeping their voice and meaning. Return the improved text first, then a short list of the most important changes." },
-  { id: 'simple', name: 'Explain it simply', style: 'balanced',
-    system: 'Explain things so a curious 10-year-old could follow: short sentences, everyday words, and one concrete example or comparison. Offer to go deeper at the end.' },
-  { id: 'translator', name: 'Translator', style: 'precise',
-    system: "Translate the user's text, keeping meaning, tone and formatting. If no target language is given, translate into English, or from English into the language the user writes in. Output only the translation unless asked for notes." },
-  { id: 'analyst', name: 'Data analyst', style: 'precise',
-    system: 'You are a careful data analyst. Describe the structure of any data you are given, work out what is asked step by step, show formulas or code (Python with pandas, or SQL), and state your assumptions and caveats.' },
-  { id: 'brainstorm', name: 'Brainstorm partner', style: 'creative',
-    system: "Generate many varied, original ideas quickly. Group them, mark the three most promising, and build on the user's ideas rather than dismissing them." },
-  { id: 'concise', name: 'Ultra concise', style: 'precise',
-    system: 'Answer in as few words as possible. No preamble, no summaries, no filler.' },
-];
 const STYLES = {
   precise: { label: 'Precise', help: 'Sticks to the most likely answer. Best for code, facts, maths.', temperature: 0.2 },
   balanced: { label: 'Balanced', help: "Uses the model authors' recommended settings.", temperature: null },
@@ -118,7 +95,7 @@ const STYLES = {
 };
 const styleOf = (cs) => (cs.temperature === null || cs.temperature === undefined ? 'balanced'
   : cs.temperature <= 0.4 ? 'precise' : cs.temperature >= 0.9 ? 'creative' : 'custom');
-const allPresets = () => [...PRESETS, ...(S.prefs.customPresets || []).map((p) => ({ ...p, custom: true }))];
+const allPresets = () => [...PRESETS, ...(S.prefs.customPresets || []).map((p) => ({ ...p, cat: 'mine', custom: true }))];
 
 const S = {
   mode: null,            // 'ephemeral' | 'vault'
@@ -133,6 +110,9 @@ const S = {
   shared: null,          // Windows: { dedicated_mb, shared_mb } of the main GPU
   sharedBaseline: null,  // shared_mb seen while no model was loaded
   loadedCtx: {},         // model -> num_ctx we last loaded it with
+  utilHist: [],          // smoothed GPU load history (one point per poll)
+  utilEma: null,
+  roleCat: 'everyday',
   connected: null,
   version: '',
   gen: null,             // { reqId, chatId, msgId }
@@ -727,11 +707,12 @@ function messageHtml(m, isLast) {
   const body = user ? esc(m.content) : assistantBody(m);
   const actions = user
     ? '<button data-act="edit" type="button">Edit</button><button data-act="copy" type="button">Copy</button><button data-act="del" type="button">Delete</button>'
-    : `<button data-act="copy" type="button">Copy</button>${isLast ? '<button data-act="regen" type="button">Regenerate</button>' : ''}<button data-act="del" type="button">Delete</button>`;
+    : `<button data-act="copy" type="button">Copy</button>${m.content && !m.error ? '<button data-act="review" type="button" title="Ask another local model to check this answer">Review</button><button data-act="factcheck" type="button" title="Copy a ready-made prompt for an online assistant">Fact-check online</button>' : ''}${isLast ? '<button data-act="regen" type="button">Regenerate</button>' : ''}<button data-act="del" type="button">Delete</button>`;
   const who = user ? 'You' : esc(m.model || 'Assistant');
   return `<div class="msg ${m.role}" data-id="${m.id}"><div class="avatar">${user ? 'you' : 'ai'}</div><div>` +
     `<div class="who">${who}</div>${files ? `<div class="msg-files">${files}</div>` : ''}` +
     `<div class="bubble${!user && m.pending && splitThink(m.content).body ? ' cursor' : ''}">${body}</div>` +
+    (m.review ? reviewHtml(m) : '') +
     `<div class="msg-meta">${m.pending ? `<span class="live-status" data-live="${m.id}">${liveStatus(m)}</span>` : `${user ? '' : fmtStats(m)}<span class="msg-actions">${actions}</span>`}</div></div></div>`;
 }
 
@@ -747,13 +728,22 @@ function emptyState() {
     '</div>' + roleChips() + '</div>';
 }
 
+function roleCats() {
+  const cats = [...ROLE_CATS];
+  if ((S.prefs.customPresets || []).length) cats.push(['mine', 'My roles']);
+  return cats;
+}
+
 function roleChips() {
   const chat = activeChat();
   const cur = chat ? chat.settings.presetId : '';
-  const list = allPresets();
-  return `<div class="role-pick"><div class="role-title">Pick a role for this chat <span>(change any time in Tune)</span></div><div class="role-chips">` +
-    list.map((p) => `<button type="button" class="role-chip${p.id === cur ? ' on' : ''}" data-role="${esc(p.id)}" title="${esc(p.system)}">${esc(p.name)}</button>`).join('') +
-    '</div></div>';
+  const curP = allPresets().find((p) => p.id === cur);
+  const cats = roleCats();
+  if (!cats.some(([k]) => k === S.roleCat)) S.roleCat = cats[0][0];
+  const list = allPresets().filter((p) => p.cat === S.roleCat);
+  return `<div class="role-pick"><div class="role-title">Pick a role for this chat <span>${curP ? `· now: ${esc(curP.name)}` : '(change any time in Tune)'}</span></div>` +
+    `<div class="role-tabs">${cats.map(([k, l]) => `<button type="button" data-rolecat="${k}" class="${k === S.roleCat ? 'on' : ''}">${esc(l)}</button>`).join('')}</div>` +
+    `<div class="role-chips">${list.map((p) => `<button type="button" class="role-chip${p.id === cur ? ' on' : ''}" data-role="${esc(p.id)}" title="${esc(p.system)}">${esc(p.name)}</button>`).join('')}</div></div>`;
 }
 
 function renderMessages(scrollToEnd) {
@@ -781,7 +771,7 @@ function renderAttachments() {
       const warn = chat && chat.model && S.info[chat.model] && !vision;
       return `<div class="att${warn ? ' warn' : ''}" title="${warn ? 'This model cannot see images' : ''}"><img src="data:${esc(a.mime)};base64,${a.b64}" alt=""><span class="n">${esc(a.name)}<small>${warn ? 'model can’t see images' : 'image'}</small></span><button class="rm" data-i="${i}" type="button">×</button></div>`;
     }
-    return `<div class="att"><span class="n">📄 ${esc(a.name)}<small>≈ ${fmtInt(estTokens(a.text))} tokens${a.from === 'pdf' ? ' · from PDF' : ''}</small></span><button class="rm" data-i="${i}" type="button">×</button></div>`;
+    return `<div class="att"><span class="n">📄 ${esc(a.name)}<small>≈ ${fmtInt(estTokens(a.text))} tokens${a.from ? ` · from ${a.from === 'pdf' ? 'PDF' : esc(a.from)}` : ''}</small></span><button class="rm" data-i="${i}" type="button">×</button></div>`;
   }).join('');
   renderCtxBar();
 }
@@ -860,7 +850,7 @@ function renderTune() {
   const sel = !cs.presetId || edited ? '' : cs.presetId;
   html += `<div class="field"><label>Role</label>
     <select id="preset"><option value=""${sel === '' ? ' selected' : ''}>${cs.system ? (edited ? `${esc(current.name)} (edited)` : 'Custom') : 'None'}</option>
-    <optgroup label="Built-in">${PRESETS.map((p) => `<option value="${p.id}"${sel === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</optgroup>
+    ${ROLE_CATS.map(([k, l]) => `<optgroup label="${esc(l)}">${PRESETS.filter((p) => p.cat === k).map((p) => `<option value="${p.id}"${sel === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</optgroup>`).join('')}
     ${(S.prefs.customPresets || []).length ? `<optgroup label="My roles">${S.prefs.customPresets.map((p) => `<option value="${p.id}"${sel === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</optgroup>` : ''}
     </select>
     <textarea id="system" placeholder="Standing instructions for this chat, e.g. You are a senior Rust engineer. Answer concisely.">${esc(cs.system || '')}</textarea>
@@ -992,7 +982,7 @@ function renderMemCard() {
   const g = S.gpu[0];
   if (g) {
     html += `<div class="live-hw">Graphics card now: <b>${(g.used_mb / 1024).toFixed(1)} / ${(g.total_mb / 1024).toFixed(1)} GB</b>` +
-      `${g.util_pct !== null && g.util_pct !== undefined ? ` · ${g.util_pct}% busy` : ''}${g.temp_c ? ` · ${g.temp_c}°C` : ''}` +
+      `${S.utilEma !== null ? ` · load ${Math.round(S.utilEma)}%` : ''}${g.temp_c ? ` · ${g.temp_c}°C` : ''}` +
       `${S.shared ? ` · shared RAM ${(S.shared.shared_mb / 1024).toFixed(1)} GB` : ''}</div>`;
   }
   card.innerHTML = html;
@@ -1146,6 +1136,15 @@ async function addFiles(fileList) {
         const text = await Backend.pdfText(await readB64(f));
         if (!text.trim()) { toast(`${name} has no text layer (it's probably scanned). Take a screenshot of the page and use a vision model instead.`, 'bad'); continue; }
         S.pending.push({ kind: 'text', name, text: text.trim(), size: f.size, from: 'pdf' });
+      } else if (/\.(docx|xlsx|pptx)$/i.test(name)) {
+        const text = await Office.extract(f);
+        if (!text.trim()) { toast(`${name}: no text found inside.`, 'bad'); continue; }
+        const kind = { docx: 'Word', xlsx: 'Excel', pptx: 'PowerPoint' }[name.split('.').pop().toLowerCase()];
+        S.pending.push({ kind: 'text', name, text, size: f.size, from: kind });
+      } else if (/\.(doc|xls|ppt|rtf|odt|ods|odp|pages|numbers|key)$/i.test(name)) {
+        toast(`${name}: this format can't be read yet. Save it as .docx, .xlsx, .pptx or PDF (or copy and paste the text).`, 'bad');
+      } else if (/\.(zip|7z|rar|tar|gz|exe|dll|msi|iso|mp3|wav|flac|m4a|ogg|mp4|mkv|mov|avi|webm)$/i.test(name)) {
+        toast(`${name}: audio, video, archives and programs can't be attached.`, 'bad');
       } else if (TEXT_EXT.test(name) || f.type.startsWith('text/') || (f.size < MAX_TEXT && await looksLikeText(f))) {
         if (f.size > MAX_TEXT) { toast(`${name} is too large to add as text (max 8 MB).`, 'bad'); continue; }
         S.pending.push({ kind: 'text', name, text: await f.text(), size: f.size });
@@ -1173,6 +1172,8 @@ function openSheet(kind) {
   if (kind === 'models') renderModelsSheet(true);
   if (kind === 'privacy') renderPrivacySheet();
   if (kind === 'guide') renderGuideSheet();
+  if (kind === 'bench') { refreshModels().then(() => Promise.all(S.models.map((m) => ensureInfo(m.name)))).then(renderBenchSheet); renderBenchSheet(); }
+  if (kind === 'setup') renderSetupSheet();
 }
 function closeSheet() { $('#sheet').hidden = true; }
 
@@ -1202,7 +1203,9 @@ async function renderModelsSheet(refresh) {
       if (fit) fitHtml = `<span class="fit status ok">Fits on GPU up to ≈ ${fmtCtx(fit)} context</span>`;
       else {
         const ms = memState(m.name, 4096);
-        fitHtml = `<span class="fit status spill">Too big for this GPU: ≈ ${Math.round((ms.gpuShare || 0) * 100)}% GPU at 4k context, rest on CPU (slow)</span>`;
+        fitHtml = ms.status === 'spill'
+          ? `<span class="fit status spill">Too big for this GPU: ≈ ${Math.round((ms.gpuShare || 0) * 100)}% on GPU at 4k context, the rest from normal RAM (slow)</span>`
+          : '<span class="fit status tight">Only just fits: little room left for conversation memory</span>';
       }
     }
     const loaded = loadedEntry(m.name);
@@ -1215,8 +1218,11 @@ async function renderModelsSheet(refresh) {
       <button class="btn small" data-use="${esc(m.name)}" type="button">Use</button>
       <button class="btn small danger" data-delete="${esc(m.name)}" type="button">Delete</button></div></div>`;
   }
-  box.innerHTML = html;
+  box.innerHTML = html + modelsExtrasHtml();
   renderPulls();
+  updateCalc();
+  if (!ENV) await loadEnv();
+  fillStorage('#mx-storage');
 }
 
 function renderPulls() {
@@ -1409,6 +1415,7 @@ function enterSession(mode) {
     Backend.setUrl(S.prefs.ollamaUrl).then(() => { S.connected = null; refreshModels(); }).catch(() => {});
   }
   refreshModels();
+  detectOllamaEnv();
 }
 
 async function onGateClick(e) {
@@ -1599,6 +1606,8 @@ function bind() {
     }
   }, true);
   box.addEventListener('click', async (e) => {
+    const tab = e.target.closest('[data-rolecat]');
+    if (tab) { S.roleCat = tab.dataset.rolecat; renderMessages(false); return; }
     const rc = e.target.closest('[data-role]');
     if (rc) {
       const chat = activeChat() || newChat();
@@ -1620,6 +1629,9 @@ function bind() {
     const act = b.dataset.act;
     if (act === 'copy') copyText(m.role === 'assistant' ? splitThink(m.content).body : m.content);
     if (act === 'del') { chat.messages.splice(idx, 1); renderMessages(false); persist(); }
+    if (act === 'review' && !(m.review && m.review.pending)) reviewMessage(chat, idx);
+    if (act === 'factcheck') factCheckMessage(chat, idx);
+    if (act === 'review-close') { delete m.review; renderMessages(false); persist(); }
     if (act === 'regen' && !S.gen) { chat.messages.splice(idx, 1); generate(chat); }
     if (act === 'edit' && !S.gen) {
       const bubble = $('.bubble', node);
@@ -1645,7 +1657,12 @@ function bind() {
     if (files.length && !e.clipboardData.getData('text/plain')) { e.preventDefault(); addFiles(files); }
   });
   $('#send-btn').onclick = () => (S.gen ? stop() : send());
-  $('#attach-btn').onclick = () => $('#file-input').click();
+  $('#attach-btn').onclick = (e) => { e.stopPropagation(); toggleAttachPop(); };
+  $('#attach-pop').addEventListener('click', (e) => {
+    if (e.target.closest('#pick-files')) { $('#attach-pop').hidden = true; $('#file-input').click(); }
+    e.stopPropagation();
+  });
+  document.addEventListener('click', () => { $('#attach-pop').hidden = true; });
   $('#file-input').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
   $('#attachments').addEventListener('click', (e) => {
     const rm = e.target.closest('.rm');
@@ -1674,6 +1691,7 @@ function bind() {
     else if (mod && e.key === ',') { e.preventDefault(); toggleTune(); }
     else if (e.key === 'Escape') {
       if (!$('#modal').hidden) return;
+      if (!$('#attach-pop').hidden) { $('#attach-pop').hidden = true; return; }
       if (S.gen) stop();
       else if (!$('#sheet').hidden) closeSheet();
       else if (!$('#tune').hidden) toggleTune(false);
@@ -1683,22 +1701,73 @@ function bind() {
   window.addEventListener('focus', () => { if (S.mode) refreshModels(); });
 }
 
+function toggleAttachPop() {
+  const pop = $('#attach-pop');
+  if (!pop.hidden) { pop.hidden = true; return; }
+  const chat = activeChat();
+  const model = chat && chat.model;
+  const vision = model && capabilities(model).includes('vision');
+  const known = model && S.info[model];
+  const img = !model ? '<em>Pick a model first.</em>'
+    : vision ? `<em class="ok">✓ ${esc(model)} can see images</em>`
+      : known ? `<em class="bad">✗ ${esc(model)} can't see images. Pick a model tagged "vision".</em>` : '<em>Checking the model…</em>';
+  pop.innerHTML = `<div class="ap-head"><button class="btn primary small" id="pick-files" type="button">Choose files…</button><span class="def">or drag files anywhere · paste screenshots with Ctrl+V</span></div>
+    <div class="ap-grid">
+      <div><b>Images</b><span>PNG, JPG, WEBP, GIF, BMP</span>${img}</div>
+      <div><b>PDF</b><span>PDFs with real text. Scanned pages have none: screenshot them for a vision model instead.</span></div>
+      <div><b>Office</b><span>Word .docx, Excel .xlsx (as tables), PowerPoint .pptx (slide text). For old .doc/.xls/.ppt, save in the new format first.</span></div>
+      <div><b>Text &amp; data</b><span>TXT, Markdown, CSV, TSV, JSON, XML, HTML, YAML, TOML, INI, LOG, SRT and similar</span></div>
+      <div><b>Code</b><span>Python, JavaScript/TypeScript, Rust, Go, Java, C/C++, C#, PHP, Ruby, SQL, shell, PowerShell and most other source files</span></div>
+      <div class="no"><b>Not supported yet</b><span>Audio, video, archives (.zip), programs, and pictures inside documents</span></div>
+    </div>
+    <p class="def">Everything is read on this PC and added to your message as text. Files use the model's memory, so big ones need a bigger "How much it remembers".</p>`;
+  pop.hidden = false;
+}
+
 let ctxTimer = null;
 function renderCtxBarSoon() { clearTimeout(ctxTimer); ctxTimer = setTimeout(renderCtxBar, 150); }
 
-let pollCount = 0;
-async function poll() {
-  if (document.hidden) return;
-  pollCount++;
-  // The Windows shared-memory counter is slower to read, so check it less often
-  // unless a model is loaded (that's when overflow happens).
-  const wantShared = S.ps.length || S.gen || pollCount % 4 === 1;
-  await Promise.all([refreshGpu(), refreshPs(), wantShared ? refreshShared() : null]);
-  if (S.mode) {
-    renderGauge();
-    renderHardware();
-    if (!$('#tune').hidden) renderMemCard();
-  }
+// Each source has its own steady timer so a slow one (the Windows counter) never
+// delays the others; GPU load is smoothed so one-off spikes don't make it jump around.
+let gpuBusy = false;
+let psBusy = false;
+let sharedBusy = false;
+async function pollGpu() {
+  if (document.hidden || gpuBusy) return;
+  gpuBusy = true;
+  try {
+    await refreshGpu();
+    const g = S.gpu[0];
+    if (g && g.util_pct !== null && g.util_pct !== undefined) {
+      S.utilEma = S.utilEma === null ? g.util_pct : S.utilEma * 0.6 + g.util_pct * 0.4;
+      S.utilHist.push(g.util_pct);
+      if (S.utilHist.length > 60) S.utilHist.shift();
+    }
+    if (S.mode) renderHardware();
+  } finally { gpuBusy = false; }
+}
+async function pollPs() {
+  if (document.hidden || psBusy) return;
+  psBusy = true;
+  try {
+    await refreshPs();
+    if (S.mode) { renderGauge(); if (!$('#tune').hidden) renderMemCard(); }
+  } finally { psBusy = false; }
+}
+async function pollShared() {
+  if (document.hidden || sharedBusy) return;
+  sharedBusy = true;
+  try { await refreshShared(); } finally { sharedBusy = false; }
+}
+
+function sparkline(values) {
+  if (values.length < 2) return '';
+  const w = 100;
+  const h = 18;
+  const step = w / 59;
+  const off = (60 - values.length) * step;
+  const pts = values.map((v, i) => `${(off + i * step).toFixed(1)},${(h - (Math.min(100, v) / 100) * h).toFixed(1)}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${pts}" /></svg>`;
 }
 
 function renderHardware() {
@@ -1712,7 +1781,8 @@ function renderHardware() {
   const name = g.name.replace(/^NVIDIA\s+/i, '').replace(/^GeForce\s+/i, '');
   el.innerHTML = `<div class="hw-row"><span>${esc(name)}</span><span>${used.toFixed(1)} / ${total.toFixed(1)} GB</span></div>` +
     `<div class="hw-bar"><span style="width:${pct}%" class="${pct > 95 ? 'hot' : ''}"></span></div>` +
-    `<div class="hw-row dim"><span>${g.util_pct !== null && g.util_pct !== undefined ? `${g.util_pct}% busy` : ''}${g.temp_c ? ` · ${g.temp_c}°C` : ''}</span>` +
+    (S.utilEma !== null ? `<div class="hw-row"><span title="Smoothed. The line shows the last 2 minutes">Load ${Math.round(S.utilEma)}%</span>${sparkline(S.utilHist)}</div>` : '') +
+    `<div class="hw-row dim"><span>${g.temp_c ? `${g.temp_c}°C` : ''}</span>` +
     `<span>${S.ps.length ? `${esc(S.ps.map((p) => p.name).join(', '))} loaded` : 'no model loaded'}</span></div>` +
     (over > 1 ? `<div class="hw-row bad">⚠ ${over.toFixed(1)} GB overflowed into RAM</div>` : '');
 }
@@ -1732,9 +1802,11 @@ async function boot() {
   const vs = await Backend.vaultStatus().catch(() => ({ exists: false }));
   showGate(vs.exists ? 'unlock' : 'welcome');
   refreshModels();
-  setInterval(poll, 4000);
+  setInterval(pollGpu, 2000);
+  setInterval(pollPs, 3000);
+  setInterval(pollShared, 6000);
   setInterval(() => { if (S.mode) refreshModels(); }, 30000);
   setInterval(autoLockTick, 20000);
 }
 
-boot();
+window.addEventListener('DOMContentLoaded', boot);

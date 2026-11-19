@@ -28,6 +28,8 @@ const Backend = (() => {
       vaultDestroy: () => inv('vault_destroy'),
       gpuInfo: () => inv('gpu_info'),
       gpuShared: () => inv('gpu_shared'),
+      ollamaEnv: () => inv('ollama_env'),
+      setOllamaEnv: (name, value) => inv('set_ollama_env', { name, value }),
       dataMap: () => inv('data_map'),
       shredFiles: (paths) => inv('shred_files', { paths }),
       pdfText: (dataB64) => inv('extract_pdf_text', { dataB64 }),
@@ -40,6 +42,7 @@ const Backend = (() => {
   const aborts = new Map();
   let fakeVault = null; // { pass, data }
   let unlocked = false;
+  const devEnv = { OLLAMA_NUM_PARALLEL: '4' };
 
   async function json(resp) {
     const text = await resp.text();
@@ -108,8 +111,10 @@ const Backend = (() => {
     vaultDestroy: async () => { fakeVault = null; unlocked = false; },
     gpuInfo: async () => {
       const v = parseFloat(params.get('vram'));
-      return v ? [{ name: 'Dev GPU', total_mb: Math.round(v * 1024), used_mb: 900, util_pct: 37, temp_c: 54 }] : [];
+      return v ? [{ name: 'Dev GPU', total_mb: Math.round(v * 1024), used_mb: 900, util_pct: Math.round(20 + Math.random() * 70), temp_c: 54 }] : [];
     },
+    ollamaEnv: async () => ({ ...devEnv }),
+    setOllamaEnv: async (name, value) => { if (value) devEnv[name] = value; else delete devEnv[name]; },
     gpuShared: async () => {
       const sh = parseFloat(params.get('shared'));
       return isNaN(sh) ? null : { dedicated_mb: 11800, shared_mb: Math.round(sh * 1024) };

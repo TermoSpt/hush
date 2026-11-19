@@ -98,3 +98,13 @@ Leave them on **auto** unless you have a reason. Auto uses the model author's re
 ## 8. Images
 
 Chat models output text only. For screenshots, use a **vision** model (e.g. Gemma 3, Qwen-VL, LLaVA). Generating images needs a diffusion model (Stable Diffusion, Flux), usually through ComfyUI. It's on Hush's roadmap.
+
+## 9. Testing a model yourself
+
+Download counts, star ratings and leaderboard positions measure popularity and test-taking, not how well a model answers *your* questions. Hush's **Test models** screen gives every model the same short exam at temperature 0, so the results can be repeated:
+
+- **Facts, maths, logic, code**: questions with one checkable answer.
+- **Instructions**: does it do exactly what was asked (only "OK", valid JSON, a word limit)?
+- **Honesty**: questions about things that don't exist (a fake book, a non-existent Python function, a Nobel Prize that isn't awarded). A trustworthy model says so. A model that invents a fluent answer here will invent things in your work too.
+
+For single answers, use **Review** (a second local model checks it; pick a different and preferably larger one) or **Fact-check online** (copies a ready-made prompt for an online assistant). Small local judges make mistakes too, so for anything important, check with a source you trust.

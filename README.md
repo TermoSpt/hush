@@ -15,9 +15,13 @@ Hush sits on top of [Ollama](https://ollama.com) (which runs the models) and add
 - **Simple and Advanced tuning.** Simple: how much it remembers, style (Precise / Balanced / Creative), thinking on/off, role. Advanced adds every sampling control, cache type, GPU size and the Ollama address.
 - **Per-model settings.** "Remember for this model" makes every new chat with that model start with your memory, style and thinking setup.
 - **Context you can see.** A slider with a "Fit to GPU" button, plus a bar showing how full the conversation is, so you notice before Ollama silently cuts off the start.
-- **Attachments.** Drag and drop or paste. Images go to vision models; code, text and PDFs go into your message.
+- **Attachments.** Drag and drop, paste, or click + to see exactly what's supported: images (for vision models, with a clear can/can't-see indicator), PDF, Word .docx, Excel .xlsx, PowerPoint .pptx, and text, data and code files. Everything is read locally.
 - **Per-chat tuning.** Temperature, Top P/K, Min P, repeat penalty, seed, max length, thinking on/off/effort, and a system prompt. Each one says in plain words what it does, and **auto** uses the model author's recommended value (shown under the slider).
 - **Models screen.** Download, delete and unload models, see each one's capabilities, and check how much context fits on your GPU.
+- **Test models.** Download counts aren't quality. A 20-question exam with automatically checked answers (facts, maths, logic, instructions, code, and *honesty traps* that catch made-up answers), run on your PC with results kept side by side.
+- **Review and Fact-check.** Under any answer: *Review* asks a second local model to check it; *Fact-check online* copies a ready-made prompt for Claude, ChatGPT and so on (Hush stays offline; you choose what leaves).
+- **Setup check.** Detects how Ollama is configured and applies the recommended settings in one click on Windows (flash attention, q8_0 cache, a single parallel slot, no terminal history). It also shows and changes where models are stored.
+- **Model guide.** A "Will it fit?" calculator before you download, and a plain explanation of model names (size, instruct/base, quantization, MoE).
 - **Two session modes.** *Ephemeral*: nothing ever touches the disk. *Encrypted vault*: chats are saved in one encrypted file.
 - **Wipe in one click** (Ctrl+Shift+L). Erases or locks the session, unloads models from GPU memory and clears the clipboard.
 - **Data map.** Lists every file Hush *and Ollama* keep on your PC, including Ollama's logs and its plain-text terminal prompt history, and lets you shred them.
@@ -31,6 +35,7 @@ Hush sits on top of [Ollama](https://ollama.com) (which runs the models) and add
 | Ephemeral mode | Chats, attachments and settings exist only in memory. |
 | Vault | One file, `vault.hush` in the app-data folder. XChaCha20-Poly1305, with the key derived from your passphrase by Argon2id (64 MiB, 3 passes). The key is held in memory only while unlocked and zeroed on lock. |
 | Web engine | The window runs in private (incognito) mode: no cache, cookies or web storage are kept. |
+| Settings | Hush only changes Ollama settings when you click, and only from a fixed list (flash attention, cache type, parallel slots, history, models folder). Every value is validated, and nothing goes through a shell. |
 | Plugins | None. No filesystem, shell, HTTP or opener plugins. The UI can only call Hush's own commands. |
 
 **What Hush can't control,** stated plainly:
@@ -77,13 +82,18 @@ In a normal browser the UI runs in "dev mode": it talks to Ollama directly and u
 ```
 ui/                 the interface: plain HTML/CSS/JS, no build step, no dependencies
   app.js            app logic
+  roles.js          built-in roles, by category
+  bench.js          test bench, judge review, fact-check prompt
+  setup.js          setup check, models folder, fit calculator
+  office.js         text from .docx / .xlsx / .pptx (built-in unzip, no libraries)
   estimate.js       GPU memory estimator (weights + KV cache + buffers)
   markdown.js       small, safe markdown renderer
   backend.js        calls into the Rust core (or a browser dev fallback)
 src-tauri/src/
   ollama.rs         localhost-only Ollama bridge with streaming and cancel
   vault.rs          encrypted vault
-  system.rs         GPU info, data map, shredding, PDF text
+  system.rs         GPU info, shared-memory overflow, data map, shredding, PDF text
+  env.rs            read/apply Ollama settings (whitelisted, validated)
 tools/mock_ollama.py
 docs/TUNING.md      how local models actually use memory, in plain language
 ```

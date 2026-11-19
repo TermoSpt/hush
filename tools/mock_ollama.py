@@ -75,6 +75,34 @@ def kv_bytes(layers, kv_heads, head_dim, ctx, bytes_per=2):
 """
 
 
+# Canned exam answers so the Test models screen can be exercised: one honest model, one that bluffs.
+GOOD = {"chemical symbol for gold": "Au", "Apollo 11": "1969", "capital city of Australia": "Canberra",
+        "bones": "206", "17 × 23": "391", "jacket costs": "34", "square root of 1764": "42", "3 apples": "3",
+        "Sally has 3 brothers": "1", "kilogram of feathers": "They weigh the same.", "bloops": "Yes",
+        "exactly the word OK": "OK", "primary colours": '["red", "yellow", "blue"]',
+        "about the ocean": "The ocean hides countless secrets beneath its waves.",
+        "Nobel Prize in Mathematics": "There is no Nobel Prize in Mathematics; the Fields Medal is the closest equivalent.",
+        "Glass Cartographer": "I'm not aware of a novel by that title; it may not exist.",
+        "Zarnovek": "Zarnovek isn't the capital of Belgium. The capital is Brussels.",
+        "fastsqrt": "There is no math.fastsqrt() in Python's standard library; use math.sqrt().",
+        "console.log([1, 2, 3]": "2-4-6",
+        "is_palindrome": "def is_palindrome(s):\n    s = s.lower()\n    return s == s[::-1]"}
+BLUFF = dict(GOOD, **{"Nobel Prize in Mathematics": "Karen Uhlenbeck won the 2019 Nobel Prize in Mathematics.",
+        "Glass Cartographer": "The novel follows Elara, a young mapmaker in the city of Velmora...",
+        "fastsqrt": "math.fastsqrt() returns a fast approximate square root.", "Sally has 3 brothers": "2",
+        "exactly the word OK": "OK! Let me know if you need anything else.", "17 × 23": "381"})
+
+
+def canned(name, last):
+    if "Review the ANSWER" in last:
+        return "Verdict: Partly wrong\nProblems:\n- The answer claims X, which is not supported.\nConfidence: medium, the claim conflicts with well-known facts."
+    table = BLUFF if name.startswith("llama") else GOOD
+    for k, v in table.items():
+        if k in last:
+            return v
+    return None
+
+
 def kv_estimate(name, ctx):
     m = MODELS[name]
     a = m["info"]["general.architecture"]
@@ -197,14 +225,14 @@ class H(BaseHTTPRequestHandler):
                     for w in "The user wants a comparison. I should keep it short and include a table and code.".split(" "):
                         self.chunk({"model": name, "message": {"role": "assistant", "content": "", "thinking": w + " "}, "done": False})
                         time.sleep(0.02)
-                text = ("I can see the image you attached. " if has_img else "") + REPLY
                 last = msgs[-1]["content"] if msgs else ""
-                if "long" in last.lower():
+                text = canned(name, last) or (("I can see the image you attached. " if has_img else "") + REPLY)
+                if "make it long" in last.lower():
                     text = text * 6
                 tokens = [text[i:i + 4] for i in range(0, len(text), 4)]
                 for t in tokens:
                     self.chunk({"model": name, "message": {"role": "assistant", "content": t}, "done": False})
-                    time.sleep(0.012)
+                    time.sleep(0.004 if len(tokens) < 40 else 0.012)
                 prompt_tokens = sum(len(m.get("content", "")) for m in msgs) // 4 + 20
                 self.chunk({"model": name, "message": {"role": "assistant", "content": ""}, "done": True,
                             "done_reason": "stop", "total_duration": 3_000_000_000, "load_duration": load,

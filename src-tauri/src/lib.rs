@@ -1,3 +1,4 @@
+mod env;
 mod ollama;
 mod system;
 mod vault;
@@ -20,6 +21,8 @@ pub fn run() {
             vault::vault_save,
             vault::vault_lock,
             vault::vault_destroy,
+            env::ollama_env,
+            env::set_ollama_env,
             system::gpu_info,
             system::gpu_shared,
             system::data_map,
