@@ -9,21 +9,25 @@ let restartNeeded = false;
 
 const isOn = (v) => v === '1' || v === 'true';
 
+// Each setting: the choices offered (value '' = remove it and use Ollama's default).
 const SETUP_ITEMS = [
-  { name: 'OLLAMA_FLASH_ATTENTION', title: 'Flash attention', rec: '1', good: isOn,
-    show: (v) => (isOn(v) ? 'On' : v ? 'Off' : 'Not set (Ollama decides)'),
-    why: 'A faster way of handling long conversations, and required for the memory-saving setting below. Safe on NVIDIA cards.' },
-  { name: 'OLLAMA_KV_CACHE_TYPE', title: 'Conversation memory format', rec: 'q8_0', good: (v) => ['q8_0', 'q4_0', 'f16'].includes(v),
-    show: (v) => (v === 'f16' ? 'f16 (chosen for speed)' : v || 'f16 (default)'),
-    alt: { 'q8_0': ['f16', 'Prefer speed (f16)'], f16: ['q8_0', 'Prefer memory (q8_0)'] },
-    why: 'A trade-off. q8_0 halves the memory each conversation needs (about twice the context on the same card) with almost no quality loss, but it can be slightly slower on some cards. f16 is the fastest when your models already fit comfortably. Needs flash attention on.' },
-  { name: 'OLLAMA_NUM_PARALLEL', title: 'Parallel requests', rec: '1', good: (v) => !v || v === '1',
-    show: (v) => v || 'Not set (Ollama decides)',
-    why: 'Every parallel slot reserves its own conversation memory. For one person on one PC, 1 is best: more room for context.' },
-  { name: 'OLLAMA_NOHISTORY', title: 'Terminal prompt history', rec: '1', good: isOn,
-    show: (v) => (isOn(v) ? 'Off: nothing saved' : 'On: saved in plain text'),
-    why: '`ollama run` in a terminal saves everything you type to a plain-text file (~/.ollama/history). Turn it off for privacy.' },
+  { name: 'OLLAMA_FLASH_ATTENTION', title: 'Flash attention', rec: '1',
+    choices: [['1', 'On'], ['0', 'Off'], ['', 'Ollama default']],
+    why: 'A faster, leaner way of handling long conversations. Required for the smaller memory formats below. Safe on NVIDIA cards.' },
+  { name: 'OLLAMA_KV_CACHE_TYPE', title: 'Conversation memory format', rec: 'q8_0',
+    choices: [['f16', 'f16 · fastest'], ['q8_0', 'q8_0 · half the memory'], ['q4_0', 'q4_0 · quarter memory'], ['', 'Ollama default (f16)']],
+    why: 'A trade-off. q8_0 roughly doubles how much conversation fits, with almost no quality loss, but can be slightly slower on some cards. Pick f16 if your models already fit comfortably and you want maximum speed. q4_0 saves the most memory but can hurt quality in long chats. Only works with flash attention on.' },
+  { name: 'OLLAMA_NUM_PARALLEL', title: 'Parallel requests', rec: '1',
+    choices: [['1', '1'], ['2', '2'], ['4', '4'], ['', 'Ollama default']],
+    why: 'Every parallel slot reserves its own conversation memory. For one person on one PC, 1 leaves the most room.' },
+  { name: 'OLLAMA_MAX_LOADED_MODELS', title: 'Models kept in memory at once', rec: '1',
+    choices: [['1', '1'], ['2', '2'], ['', 'Ollama default']],
+    why: 'With 1, switching models (or using another model for Review) swaps the old one out instead of squeezing two into graphics memory. On cards up to 16 GB, 1 is safest. With 24 GB or more, 2 lets you switch instantly.' },
+  { name: 'OLLAMA_NOHISTORY', title: 'Terminal prompt history', rec: '1',
+    choices: [['1', 'Off (not saved)'], ['', 'On (Ollama default)']],
+    why: '`ollama run` in a terminal saves everything you type to a plain-text file (~/.ollama/history). Off is better for privacy. This doesn\'t affect Hush.' },
 ];
+const norm = (name, v) => (name === 'OLLAMA_NOHISTORY' || name === 'OLLAMA_FLASH_ATTENTION' ? (v === 'true' ? '1' : v === 'false' ? '0' : v || '') : v || '');
 
 async function loadEnv() {
   try { ENV = await Backend.ollamaEnv(); } catch (_) { ENV = {}; }
@@ -71,14 +75,14 @@ async function renderSetupSheet() {
   html += row(g ? true : budget ? null : false, g ? `${esc(g.name)}: ${(g.total_mb / 1024).toFixed(1)} GB graphics memory` : budget ? `Graphics memory set manually: ${(budget.total / 1073741824).toFixed(1)} GB` : 'Graphics card not detected',
     g ? 'Detected automatically. Hush checks every model against this.' : 'Hush detects NVIDIA cards automatically. For AMD or Intel, enter your graphics memory under Tune → Advanced → This PC.');
 
-  html += '<h3 style="display:flex;justify-content:space-between;align-items:center">Ollama performance &amp; privacy settings <button class="btn small primary" id="sc-all" type="button">Apply all recommended</button></h3>';
+  html += '<h3 style="display:flex;justify-content:space-between;align-items:center;gap:8px">Ollama performance &amp; privacy settings <span style="display:flex;gap:6px"><button class="btn small ghost" id="sc-reset" type="button">Reset all to Ollama defaults</button><button class="btn small primary" id="sc-all" type="button">Apply all recommended</button></span></h3>';
   for (const it of SETUP_ITEMS) {
-    const v = ENV[it.name] || '';
-    const good = it.good(v);
-    html += row(good, `${it.title}: ${esc(it.show(v))}`, `${esc(it.why)} <span class="mono">${it.name}</span>`,
-      good ? (it.alt && it.alt[v] ? `<button class="btn small ghost" data-env="${it.name}" data-val="${it.alt[v][0]}" type="button">${it.alt[v][1]}</button>` : '')
-        : `<button class="btn small" data-env="${it.name}" data-val="${it.rec}" type="button">Use recommended</button>`);
+    const v = norm(it.name, ENV[it.name]);
+    const good = v === it.rec;
+    const seg = `<div class="seg-ctl sc-seg">${it.choices.map(([val, label]) => `<button type="button" data-env="${it.name}" data-val="${val}" class="${val === v ? 'on' : ''}">${esc(label)}${val === it.rec ? ' ★' : ''}</button>`).join('')}</div>`;
+    html += row(good ? true : null, esc(it.title), `${esc(it.why)} <span class="mono">${it.name}</span>${seg}`);
   }
+  html += '<p class="def">★ = recommended for one person on a typical gaming PC.</p>';
   const ctxEnv = ENV.OLLAMA_CONTEXT_LENGTH;
   html += row(null, `Default context length: ${ctxEnv ? fmtInt(ctxEnv) : 'not set'}`, 'Hush sends the context size for every chat itself (Tune → "How much it remembers"), so you don\'t need this setting. It only affects other apps and the terminal.');
   const kaEnv = ENV.OLLAMA_KEEP_ALIVE;
@@ -179,10 +183,16 @@ if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded
     if (kind !== 'setup') return;
     if (b.dataset.openSheet) { openSheet(b.dataset.openSheet); return; }
     if (b.dataset.env) {
+      if (norm(b.dataset.env, ENV[b.dataset.env]) === b.dataset.val) return;
       if (await applyEnv(b.dataset.env, b.dataset.val)) { toast('Saved. Restart Ollama to apply.', 'ok'); await detectOllamaEnv(); renderSetupSheet(); }
+    } else if (b.id === 'sc-reset') {
+      if (!await modal({ title: 'Reset Ollama settings?', body: 'Removes every setting listed here, so Ollama uses its own defaults after a restart. Your models folder is not changed.', okText: 'Reset' })) return;
+      for (const it of SETUP_ITEMS) if (norm(it.name, ENV[it.name])) await applyEnv(it.name, '');
+      toast('Settings reset. Restart Ollama to apply.', 'ok');
+      await detectOllamaEnv(); renderSetupSheet();
     } else if (b.id === 'sc-all') {
       let n = 0;
-      for (const it of SETUP_ITEMS) if (!it.good(ENV[it.name] || '') && await applyEnv(it.name, it.rec)) n++;
+      for (const it of SETUP_ITEMS) if (norm(it.name, ENV[it.name]) !== it.rec && await applyEnv(it.name, it.rec)) n++;
       if (n) toast(`${n} setting${n > 1 ? 's' : ''} saved. Restart Ollama to apply.`, 'ok');
       else toast('Everything is already set as recommended.');
       await detectOllamaEnv();

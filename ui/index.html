@@ -21,6 +21,7 @@
       <button class="nav-btn" data-open="bench" type="button">Test models</button>
       <button class="nav-btn" data-open="privacy" type="button">Privacy &amp; data</button>
       <button class="nav-btn" data-open="guide" type="button">How tuning works</button>
+      <button class="nav-btn" data-open="keys" type="button">Keyboard shortcuts</button>
       <button id="wipe-btn" class="nav-btn danger" type="button" title="Ctrl+Shift+L">Wipe session</button>
     </nav>
     <div id="hw" class="hw" title="Your graphics card, live"></div>
@@ -35,9 +36,10 @@
         <div id="caps" class="caps"></div>
       </div>
       <button id="mem-gauge" class="mem-gauge" type="button" title="GPU memory: click to tune"></button>
-      <div class="top-btns"><button id="monitor-toggle" class="btn ghost" type="button" title="Live view of your graphics card and model speed">Monitor</button><button id="tune-toggle" class="btn ghost" type="button">Tune</button></div>
+      <div class="top-btns"><button id="share-toggle" class="btn ghost" type="button" title="Copy, summarize or fact-check this whole chat">Share</button><button id="monitor-toggle" class="btn ghost" type="button" title="Live view of your graphics card and model speed">Monitor</button><button id="tune-toggle" class="btn ghost" type="button">Tune</button></div>
     </header>
 
+    <div id="share-pop" class="share-pop" hidden></div>
     <section id="messages" class="messages" aria-live="polite"></section>
 
     <footer id="composer">
@@ -58,7 +60,7 @@
   <aside id="tune" class="tune" hidden>
     <div class="tune-head">
       <h2>Tune this chat</h2>
-      <button id="tune-close" class="icon-btn" type="button" aria-label="Close">×</button>
+      <button id="tune-close" class="icon-btn" type="button" aria-label="Close"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
     </div>
     <div id="tune-body" class="tune-body"></div>
   </aside>
@@ -67,7 +69,7 @@
   <aside id="monitor" class="tune monitor" hidden>
     <div class="tune-head">
       <h2>Live monitor</h2>
-      <button id="monitor-close" class="icon-btn" type="button" aria-label="Close">×</button>
+      <button id="monitor-close" class="icon-btn" type="button" aria-label="Close"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
     </div>
     <div id="mon-body" class="tune-body"></div>
   </aside>
@@ -76,7 +78,7 @@
 <!-- ============ overlays ============ -->
 <div id="sheet" class="sheet" hidden>
   <div class="sheet-card">
-    <button id="sheet-close" class="icon-btn sheet-x" type="button" aria-label="Close">×</button>
+    <button id="sheet-close" class="icon-btn sheet-x" type="button" aria-label="Close"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
     <div id="sheet-body"></div>
   </div>
 </div>
@@ -94,5 +96,6 @@
 <script src="bench.js"></script>
 <script src="setup.js"></script>
 <script src="monitor.js"></script>
+<script src="keys.js"></script>
 </body>
 </html>

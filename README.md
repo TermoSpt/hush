@@ -20,7 +20,9 @@ Hush sits on top of [Ollama](https://ollama.com) (which runs the models) and add
 - **Attachments.** Drag and drop, paste, or click + to see exactly what's supported: images (for vision models, with a clear can/can't-see indicator), PDF, Word .docx, Excel .xlsx, PowerPoint .pptx, and text, data and code files. Everything is read locally.
 - **Per-chat tuning.** Temperature, Top P/K, Min P, repeat penalty, seed, max length, thinking on/off/effort, and a system prompt. Each one says in plain words what it does, and **auto** uses the model author's recommended value (shown under the slider).
 - **Models screen.** Download, delete and unload models, see each one's capabilities, and check how much context fits on your GPU.
-- **Test models.** Download counts aren't quality. A 20-question exam with automatically checked answers (facts, maths, logic, instructions, code, and *honesty traps* that catch made-up answers), run on your PC with results kept side by side.
+- **Test models.** Download counts aren't quality. Every model takes the same 20-question exam (facts, maths, logic, instructions, code, and *honesty traps* that catch made-up answers) at temperature 0. Answers are checked by fixed rules rather than another AI. You can add your own questions, watch progress live, and get a summary: best overall, most honest, fastest on your PC.
+- **Share a whole chat.** Copy it as text, have your local model summarize it (nothing leaves your PC), start a fresh chat from a summary, or copy it with instructions for an online fact-check or for continuing in another AI.
+- **Keyboard shortcuts you can change.** See and rebind them under *Keyboard shortcuts* (Ctrl+/).
 - **Review and Fact-check.** Under any answer: *Review* asks a second local model to check it; *Fact-check online* copies a ready-made prompt for Claude, ChatGPT and so on (Hush stays offline; you choose what leaves).
 - **Setup check.** Detects how Ollama is configured and applies the recommended settings in one click on Windows (flash attention, q8_0 cache, a single parallel slot, no terminal history). It also shows and changes where models are stored.
 - **Model guide.** A "Will it fit?" calculator before you download, and a plain explanation of model names (size, instruct/base, quantization, MoE).
@@ -55,6 +57,18 @@ Hush is meant to leave as much of your hardware as possible to the model:
 - **SSDs** can keep old copies of overwritten blocks (wear levelling), so "shredding" a file on an SSD is best effort. That's why Hush relies on encryption for anything it stores: without the passphrase, leftover blocks are unreadable.
 
 ## Install
+
+### About the Windows "protected your PC" warning
+
+Windows SmartScreen warns about any program that isn't **code-signed** by a known publisher, however safe it is. Until Hush releases are signed, click **More info → Run anyway** once on the installer. After installing, start Hush from the Start menu; the warning belongs to the downloaded installer, not the installed app.
+
+The proper fix for everyone who downloads Hush is signing the releases:
+- **SignPath Foundation** gives qualifying open-source projects a free code-signing certificate, built from the public GitHub repository (used by projects like Notepad++ and WinSCP). Hush is MIT-licensed, so it can apply.
+- **Azure Artifact Signing** (formerly Trusted Signing) costs about $9.99 a month. Individual developers can only use it in the USA and Canada; organizations also in the EU and UK.
+
+Even after signing, a brand-new certificate builds SmartScreen reputation over the first downloads. Turning off Defender or SmartScreen is not the answer: it lowers protection for everything else on the PC.
+
+### Steps
 
 1. Install [Ollama](https://ollama.com/download) and download at least one model (or do it later from Hush's Models screen).
 2. Download Hush from the [Releases](../../releases) page (`.exe` installer for Windows).
@@ -101,6 +115,7 @@ ui/                 the interface: plain HTML/CSS/JS, no build step, no dependen
   bench.js          test bench, judge review, fact-check prompt
   setup.js          setup check, models folder, fit calculator
   monitor.js        live monitor panel
+  keys.js           keyboard shortcuts (changeable)
   office.js         text from .docx / .xlsx / .pptx (built-in unzip, no libraries)
   estimate.js       GPU memory estimator (weights + KV cache + buffers)
   markdown.js       small, safe markdown renderer

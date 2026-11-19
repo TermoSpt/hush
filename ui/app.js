@@ -1,5 +1,5 @@
 'use strict';
-/* global MD, Est, Backend, Office, ROLE_CATS, PRESETS, renderBenchSheet, renderSetupSheet, toggleMonitor, recordMonitorSample, benchAsk, reviewMessage, factCheckMessage, reviewHtml, detectOllamaEnv, modelsExtrasHtml, updateCalc, fillStorage, loadEnv, ENV */
+/* global MD, Est, Backend, Office, ROLE_CATS, PRESETS, renderBenchSheet, renderSetupSheet, renderKeysSheet, handleShortcut, updateKeyHints, toggleMonitor, recordMonitorSample, benchAsk, reviewMessage, factCheckMessage, reviewHtml, detectOllamaEnv, modelsExtrasHtml, updateCalc, fillStorage, loadEnv, ENV */
 
 // =====================================================================
 // helpers
@@ -438,12 +438,13 @@ async function send() {
   if (u.used > u.limit && !chat.overflowAck) {
     const ok = await modal({
       title: 'This chat is out of memory',
-      body: `With this message the chat needs about <b>${fmtInt(u.used)}</b> tokens, but the model can only hold <b>${fmtInt(u.limit)}</b>. If you send it, the model will <b>forget the oldest messages</b>, including any files, code or decisions in them. They stay visible here for you, but the model won't see them.<br><br>Better options: <b>Summarize into new chat</b> (carries the important parts forward) or give it more memory in Tune.`,
+      body: `This chat needs about <b>${fmtInt(u.used)}</b> tokens of memory, but the model can only hold <b>${fmtInt(u.limit)}</b>.<br><br>You can still send it. The model will then <b>drop the oldest part of the chat</b> (starting from the top) to make room, and it won't remember what was in it: facts, files, code or decisions. It all stays on your screen.<br><br>To keep everything instead: <b>Summarize into new chat</b> (in the banner above the message box), or give the chat more memory in Tune.`,
       okText: 'Send anyway', cancelText: 'Go back',
     });
     if (!ok) return;
     chat.overflowAck = true;
   }
+  S.tPressed = performance.now();
   const msg = {
     id: uid(), role: 'user', content: text,
     images: images.map(({ name, mime, b64 }) => ({ name, mime, b64 })),
@@ -477,6 +478,8 @@ async function generate(chat) {
   }
   const reqId = uid();
   S.gen = { reqId, chatId: chat.id, msgId: asst.id };
+  asst.prepMs = performance.now() - (S.tPressed || L.t0);
+  S.tPressed = null;
   let gotDone = false;
   renderSidebar();
   renderMessages(true);
@@ -538,7 +541,7 @@ function liveStatus(m) {
   let r = null;
   if (L.ansTok) { r = rate(L.ansTok, L.tAns); text = `Answering · ${fmtInt(L.ansTok)} tokens`; }
   else if (L.thinkTok) { r = rate(L.thinkTok, L.tThink); text = `Thinking · ${fmtInt(L.thinkTok)} tokens`; }
-  else text = L.wasLoaded ? `Reading your prompt (≈ ${fmtInt(L.promptTok)} tokens)` : 'Loading the model into the graphics card, then reading your prompt';
+  else text = `Sent to Ollama${m.prepMs !== undefined ? ` in ${m.prepMs < 1 ? '<1' : Math.round(m.prepMs)} ms` : ''} · ${L.wasLoaded ? `it's reading your prompt (≈ ${fmtInt(L.promptTok)} tokens)` : 'it\'s loading the model into the graphics card'}`;
   if (r !== null) text += ` · ${r.toFixed(1)} tok/s`;
   text += ` · ${secs}s`;
   let hint = '';
@@ -702,8 +705,8 @@ function renderCtxBar() {
   const u = ctxUsage(chat);
   const pct = Math.min(100, (u.used / u.limit) * 100);
   bar.className = 'ctx-bar' + (u.used > u.limit ? ' bad' : pct > 85 ? ' warn' : '');
-  let label = `${u.exact ? '' : '≈ '}${fmtInt(u.used)} / ${fmtInt(u.limit)} tokens of context`;
-  if (u.used > u.limit) label += ' · the oldest messages no longer fit and will be cut off. Raise the context or start a new chat.';
+  let label = `<span class="tok-help" tabindex="0" title="Tokens are the pieces a model reads and writes: short words, or parts of longer words. In English, 1 token ≈ 4 characters ≈ ¾ of a word. While you type, Hush estimates; after each reply it uses Ollama's exact count.">${u.exact ? '' : '≈ '}${fmtInt(u.used)} / ${fmtInt(u.limit)} tokens of memory used ⓘ</span>`;
+  if (u.used > u.limit) label += ' · full: the oldest part of the chat is being forgotten';
   else if (pct > 85) label += ' · almost full';
   bar.innerHTML = `<span>${label}</span><span class="ctx-track"><span class="ctx-fill" style="width:${pct}%"></span></span>`;
   const ban = $('#ctx-banner');
@@ -711,7 +714,9 @@ function renderCtxBar() {
     const over = u.used > u.limit;
     ban.hidden = false;
     ban.className = `ctx-banner${over ? ' bad' : ''}`;
-    ban.innerHTML = `<span><b>${over ? 'Memory full.' : 'Memory almost full.'}</b> ${over ? 'The model is forgetting the oldest messages (and any progress in them).' : 'Soon the model will start forgetting the oldest messages.'}</span>
+    ban.innerHTML = `<span><b>${over ? 'Memory full.' : 'Memory almost full.'}</b> ${over
+      ? 'You can keep chatting, but from now on <b>every new message pushes the oldest part of this chat out of the model\'s memory</b>, starting from the top. It stays on your screen; the model just can\'t see it any more, including any facts, files or decisions in it.'
+      : 'Soon each new message will push the oldest part of this chat out of the model\'s memory, starting from the top. To keep everything, summarize into a new chat now.'}</span>
       <span class="ctx-acts">${chat.summarizing ? '<span class="live-status"><span class="live-dot"></span>Summarizing…</span>'
         : '<button class="btn small primary" data-ctx="summarize" type="button" title="The model writes a summary; a new chat starts from it">Summarize into new chat</button><button class="btn small" data-ctx="more" type="button">More memory</button><button class="btn small ghost" data-ctx="new" type="button">New chat</button>'}</span>`;
   } else ban.hidden = true;
@@ -1291,6 +1296,7 @@ function openSheet(kind) {
   if (kind === 'guide') renderGuideSheet();
   if (kind === 'bench') { refreshModels().then(() => Promise.all(S.models.map((m) => ensureInfo(m.name)))).then(renderBenchSheet); renderBenchSheet(); }
   if (kind === 'setup') renderSetupSheet();
+  if (kind === 'keys') renderKeysSheet();
 }
 function closeSheet() { $('#sheet').hidden = true; }
 
@@ -1533,6 +1539,7 @@ function enterSession(mode) {
   }
   refreshModels();
   detectOllamaEnv();
+  updateKeyHints();
 }
 
 async function onGateClick(e) {
@@ -1748,6 +1755,9 @@ function bind() {
     if (act === 'copy') copyText(m.role === 'assistant' ? splitThink(m.content).body : m.content);
     if (act === 'del') { chat.messages.splice(idx, 1); renderMessages(false); persist(); }
     if (act === 'review' && !(m.review && m.review.pending)) reviewMessage(chat, idx);
+    if (act === 'review-again' && !(m.review && m.review.pending)) reviewMessage(chat, idx, true);
+    if (act === 'review-collapse') { m.review.collapsed = true; renderMessages(false); persist(); }
+    if (act === 'review-expand') { m.review.collapsed = false; renderMessages(false); persist(); }
     if (act === 'factcheck') factCheckMessage(chat, idx);
     if (act === 'review-close') { delete m.review; renderMessages(false); persist(); }
     if (act === 'tip-ok') { S.prefs.tipReviewSeen = true; delete m.showTip; renderMessages(false); persist(); }
@@ -1796,6 +1806,9 @@ function bind() {
     toast(`${b.dataset.unload} unloaded. Its graphics memory is free again.`);
   });
   $('#monitor-toggle').onclick = () => toggleMonitor();
+  $('#share-toggle').onclick = (e) => { e.stopPropagation(); toggleSharePop(); };
+  $('#share-pop').addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('[data-share]'); if (b) shareAction(b.dataset.share); });
+  document.addEventListener('click', () => { $('#share-pop').hidden = true; });
   $('#monitor-close').onclick = () => toggleMonitor(false);
   $('#ctx-banner').addEventListener('click', (e) => {
     const b = e.target.closest('[data-ctx]');
@@ -1825,20 +1838,86 @@ function bind() {
   document.addEventListener('keydown', (e) => {
     S.lastActivity = Date.now();
     if (S.mode === null) return;
-    const mod = e.ctrlKey || e.metaKey;
-    if (mod && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); wipeSession(); }
-    else if (mod && !e.shiftKey && e.key.toLowerCase() === 'n') { e.preventDefault(); $('#new-chat').click(); }
-    else if (mod && e.key === ',') { e.preventDefault(); toggleTune(); }
-    else if (e.key === 'Escape') {
-      if (!$('#modal').hidden) return;
+    if (!$('#modal').hidden) return;
+    if (handleShortcut(e)) return;
+    if (e.key === 'Escape') {
       if (!$('#attach-pop').hidden) { $('#attach-pop').hidden = true; return; }
+      if (!$('#share-pop').hidden) { $('#share-pop').hidden = true; return; }
       if (S.gen) stop();
       else if (!$('#sheet').hidden) closeSheet();
       else if (!$('#tune').hidden) toggleTune(false);
+      else if (!$('#monitor').hidden) toggleMonitor(false);
     }
   });
   ['mousemove', 'mousedown', 'wheel'].forEach((ev) => document.addEventListener(ev, () => { S.lastActivity = Date.now(); }, { passive: true }));
   window.addEventListener('focus', () => { if (S.mode) refreshModels(); });
+}
+
+// ---------------------------------------------------------------- share a whole chat
+function chatTranscript(chat) {
+  const lines = [`# ${chat.title}`, '', `Local model: ${chat.model} · exported from Hush on ${new Date().toLocaleString()}`];
+  if (chat.settings.system) lines.push('', '**Role / system instructions:**', '', chat.settings.system);
+  for (const m of chat.messages) {
+    if (m.pending || m.synthetic) continue;
+    lines.push('', m.role === 'user' ? '## Me' : `## AI (${m.model || chat.model})`, '');
+    if (m.role === 'assistant') lines.push(splitThink(m.content).body || '(no answer)');
+    else {
+      lines.push(m.content || '');
+      for (const i of m.images || []) lines.push(`[attached image: ${i.name || 'image'}]`);
+      for (const f of m.files || []) lines.push('', `[attached file: ${f.name}]`, '```', f.text, '```');
+    }
+  }
+  return lines.join('\n');
+}
+
+async function confirmLeavesPC() {
+  if (S.shareAck) return true;
+  const ok = await modal({ title: 'This is for pasting outside Hush', body: 'You are copying this chat so you can paste it into another app or an online assistant. <b>Once you paste it online, it leaves your PC.</b> Don\'t do that with secrets. Hush itself stays offline.', okText: 'I understand, copy' });
+  if (ok) S.shareAck = true;
+  return ok;
+}
+
+async function shareAction(kind) {
+  const chat = activeChat();
+  if (!chat || !chat.messages.length) { toast('This chat is empty.'); return; }
+  $('#share-pop').hidden = true;
+  const transcript = chatTranscript(chat);
+  if (kind === 'copy') {
+    await copyText(transcript);
+    toast('Whole chat copied as text (Markdown). Paste it anywhere.', 'ok');
+  } else if (kind === 'factcheck') {
+    if (!await confirmLeavesPC()) return;
+    await copyText(`Please fact-check this conversation with a local AI model. For each AI answer, list factual errors, invented details or unsupported claims, and give the correct information with sources where possible. End with an overall verdict for each answer.\n\n---\n\n${transcript}`);
+    toast('Copied with fact-check instructions. Paste it into an online assistant.', 'ok');
+  } else if (kind === 'continue') {
+    if (!await confirmLeavesPC()) return;
+    await copyText(`Below is a conversation I had with a local AI model. Read it, then continue helping me from where it left off.\n\n---\n\n${transcript}`);
+    toast('Copied with "continue from here" instructions. Paste it into any AI.', 'ok');
+  } else if (kind === 'summary') {
+    if (S.gen) { toast('Wait for the current answer to finish first.'); return; }
+    toast(`Asking ${chat.model} to summarize this chat…`);
+    try {
+      const r = await benchAsk(chat.model, '', false, { messages: [...toApiMessages(chat), { role: 'user', content: SUMMARY_PROMPT }], temperature: 0.2, maxTokens: 2000, numCtx: Number(chat.settings.num_ctx), label: 'Summarizing the chat' });
+      if (!r.content.trim()) throw new Error('empty summary');
+      await copyText(`Summary of a conversation with a local AI model ("${chat.title}"):\n\n${r.content}`);
+      toast('Summary copied. It was written locally; nothing left your PC.', 'ok');
+    } catch (e) { toast(`Couldn't summarize: ${errText(e)}`, 'bad'); }
+  } else if (kind === 'newchat') {
+    summarizeToNewChat();
+  }
+}
+
+function toggleSharePop() {
+  const pop = $('#share-pop');
+  if (!pop.hidden) { pop.hidden = true; return; }
+  pop.innerHTML = `<div class="sp-title">Take this chat elsewhere</div>
+    <button data-share="copy" type="button"><b>Copy whole chat</b><span>As plain text, to paste into any app or AI</span></button>
+    <button data-share="summary" type="button"><b>Summarize &amp; copy</b><span>Your local model writes a summary; nothing leaves your PC</span></button>
+    <button data-share="newchat" type="button"><b>Summarize into a new chat</b><span>Keep going here with a fresh memory</span></button>
+    <div class="sp-sep">For online assistants (Claude, ChatGPT, Gemini…)</div>
+    <button data-share="factcheck" type="button"><b>Copy for an online fact-check</b><span>Whole chat plus instructions to check every answer</span></button>
+    <button data-share="continue" type="button"><b>Copy to continue in another AI</b><span>Whole chat plus "carry on from here"</span></button>`;
+  pop.hidden = false;
 }
 
 function toggleAttachPop() {
@@ -1913,11 +1992,13 @@ function sparkline(values) {
 
 // "unloads in 3:12" from Ollama's expires_at
 function unloadIn(p) {
+  const busy = (S.gen && activeChat() && S.chats.find((c) => c.id === S.gen.chatId)?.model === p.name) || (S.bg && S.bg.model === p.name);
+  if (busy) return 'in use now';
   if (!p.expires_at) return '';
   const t = Date.parse(p.expires_at);
   if (!t || t - Date.now() > 30 * 86400000) return 'stays loaded';
   const sec = Math.max(0, Math.round((t - Date.now()) / 1000));
-  return `unloads in ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  return `ready for ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')} more`;
 }
 
 function renderHardware() {
@@ -1930,7 +2011,7 @@ function renderHardware() {
   const ov = overflowState();
   const name = g.name.replace(/^NVIDIA\s+/i, '').replace(/^GeForce\s+/i, '');
   const loaded = S.ps.map((p) => `<div class="hw-model"><div class="hw-row"><span class="mono" title="${esc(p.name)}">${esc(p.name)}</span><button class="linkish" data-unload="${esc(p.name)}" type="button" title="Free its graphics memory now">unload</button></div>` +
-    `<div class="hw-row dim"><span>${S.gen ? 'working' : 'idle · kept loaded'}</span><span>${esc(unloadIn(p))}</span></div></div>`).join('');
+    `<div class="hw-row dim"><span>${unloadIn(p) === 'in use now' ? 'working' : 'kept ready, then freed'}</span><span>${esc(unloadIn(p).replace(' more', ''))}</span></div></div>`).join('');
   el.innerHTML = `<div class="hw-row"><b>${esc(name)}</b>${g.temp_c ? `<span>${g.temp_c}°C${g.power_w ? ` · ${Math.round(g.power_w)} W` : ''}</span>` : ''}</div>` +
     `<div class="hw-row" title="Space reserved in the graphics card's memory. A loaded model keeps its space even while idle."><span>Memory</span><span>${used.toFixed(1)} / ${total.toFixed(1)} GB</span></div>` +
     `<div class="hw-bar"><span style="width:${pct}%" class="${pct > 95 ? 'hot' : ''}"></span></div>` +
@@ -1961,10 +2042,10 @@ async function boot() {
   setInterval(() => {
     if (document.hidden || !S.mode) return;
     tick++;
-    const busy = !!S.gen || !$('#monitor').hidden;
+    const busy = !!S.gen || !!S.bg || !$('#monitor').hidden;
     if (busy || tick % 5 === 0) pollGpu();
     if (busy ? tick % 2 === 0 : tick % 5 === 0) pollPs();
-    if ((S.ps.length || S.gen) && tick % (busy ? 3 : 10) === 0) pollShared();
+    if ((S.ps.length || S.gen || S.bg) && tick % (busy ? 3 : 10) === 0) pollShared();
   }, 1000);
   pollShared();
   setInterval(() => { if (S.mode) refreshModels(); }, 30000);

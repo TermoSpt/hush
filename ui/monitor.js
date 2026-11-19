@@ -8,11 +8,14 @@
 const MON = { samples: [], hover: null, lastTok: null };
 const MON_WINDOW = 120000; // 2 minutes
 
+// The chat answer being written, or a background job (Review, Test models, summary).
 function currentGenLive() {
-  if (!S.gen) return null;
-  const chat = S.chats.find((c) => c.id === S.gen.chatId);
-  const m = chat && chat.messages.find((x) => x.id === S.gen.msgId);
-  return m && m.live ? m.live : null;
+  if (S.gen) {
+    const chat = S.chats.find((c) => c.id === S.gen.chatId);
+    const m = chat && chat.messages.find((x) => x.id === S.gen.msgId);
+    if (m && m.live) return m.live;
+  }
+  return S.bg || null;
 }
 
 function recordMonitorSample() {
@@ -112,7 +115,7 @@ function diagnosis(g) {
 }
 
 function renderMonitor() {
-  const body = $('#mon-body');
+  const body = $('#mon-live');
   if (!body || $('#monitor').hidden) return;
   const g = S.gpu[0];
   if (!g) {
@@ -126,8 +129,8 @@ function renderMonitor() {
   const ps = S.ps;
   let status;
   if (L) {
-    const words = { reading: 'Reading your prompt', thinking: 'Thinking', answering: 'Answering' }[last.phase] || 'Working';
-    status = `<span class="live-dot"></span>${words}${last.rate ? ` · ${last.rate.toFixed(0)} tok/s` : ''}`;
+    const words = { reading: 'Reading the prompt', thinking: 'Thinking', answering: 'Writing' }[last.phase] || 'Working';
+    status = `<span class="live-dot"></span>${L.label ? `${esc(L.label)} · ` : ''}${words}${last.rate ? ` · ${last.rate.toFixed(0)} tok/s` : ''}`;
   } else {
     status = ps.length ? `Idle · ${esc(ps.map((p) => `${p.name} loaded, ${unloadIn(p)}`).join('; '))}` : 'Idle · no model loaded';
   }
@@ -152,11 +155,6 @@ function renderMonitor() {
       html += `<div class="mon-model"><div><b class="mono">${esc(p.name)}</b><div class="def">${Est.fmtGB(p.size || 0)} · ${pct}% on graphics card${p.context_length ? ` · ${fmtInt(p.context_length)} context` : ''} · ${esc(unloadIn(p))}</div></div><button class="btn small" data-mon-unload="${esc(p.name)}" type="button">Unload</button></div>`;
     }
   }
-  html += `<details class="guide-box"><summary>What do these numbers mean?</summary><ul>
-    <li><b>Graphics memory</b> is <i>space</i>. A loaded model reserves it even while doing nothing, so 8 GB used at 0% compute is normal. It's freed when the model unloads.</li>
-    <li><b>Compute</b> is <i>work</i>. It's high while the model reads your prompt or writes, and near 0 when idle.</li>
-    <li><b>Reading</b> your prompt is fast because it's done in big batches. <b>Writing</b> is one token at a time and is mostly limited by the <b>memory bus</b>: how fast the card can read the whole model for every token. That's why smaller or more compressed models write faster.</li>
-    <li>If writing is slow while compute stays low, part of the model is usually outside graphics memory (on the CPU or overflowed into RAM).</li></ul></details>`;
   body.innerHTML = html;
 }
 
@@ -167,30 +165,44 @@ function replyHtml() {
   const rate = (n, d) => (n && d ? `${(n / (d / 1e9)).toFixed(0)} tok/s` : '–');
   const sec = (d) => (d ? `${(d / 1e9).toFixed(1)} s` : '–');
   return `<div class="t-sec">Last reply (${esc(lr.m.model || '')})</div><div class="reply-grid">
-    <span>Loading the model</span><b>${st.load_duration > 5e8 ? sec(st.load_duration) : 'already loaded'}</b>
+    <span title="Time Hush took to prepare and send your message">Hush, preparing &amp; sending</span><b>${lr.m.prepMs !== undefined ? `${lr.m.prepMs < 1 ? '<1' : Math.round(lr.m.prepMs)} ms` : '–'}</b>
+    <span>Ollama, loading the model</span><b>${st.load_duration > 5e8 ? sec(st.load_duration) : 'already loaded'}</b>
     <span>Reading ${fmtInt(st.prompt_eval_count || 0)} prompt tokens</span><b>${rate(st.prompt_eval_count, st.prompt_eval_duration)}</b>
     <span>Writing ${fmtInt(st.eval_count || 0)} tokens</span><b>${rate(st.eval_count, st.eval_duration)}</b>
     <span>Time to first word</span><b>${sec((st.load_duration || 0) + (st.prompt_eval_duration || 0))}</b>
     <span>Total</span><b>${sec(st.total_duration)}</b></div>`;
 }
 
+const MON_GUIDE = `<details class="guide-box"><summary>What do these numbers mean?</summary><ul>
+  <li><b>Graphics memory</b> is <i>space</i>. A loaded model reserves it even while doing nothing, so 8 GB used at 0% compute is normal.</li>
+  <li><b>Kept ready</b>: after each reply Ollama keeps the model in graphics memory for a while (10 minutes by default in Hush; change it in Tune → Advanced). The next reply then starts instantly instead of reloading for several seconds. The timer restarts after every reply; when it runs out, the memory is freed. "unload" frees it right away.</li>
+  <li><b>Compute</b> is <i>work</i>. It's high while the model reads your prompt or writes, and near 0 when idle.</li>
+  <li><b>Reading</b> your prompt is fast because it's done in big batches. <b>Writing</b> is one token at a time and is mostly limited by the <b>memory bus</b>: how fast the card can read the whole model for every token. That's why smaller or more compressed models write faster.</li>
+  <li><b>Tokens</b> are the pieces models read and write: whole short words, or parts of longer ones. In English one token is about 4 characters, or ¾ of a word.</li>
+  <li>If writing is slow while compute stays low, part of the model is usually outside graphics memory (on the CPU or overflowed into RAM).</li></ul></details>`;
+
 function toggleMonitor(force) {
   const m = $('#monitor');
   const show = force !== undefined ? force : m.hidden;
   m.hidden = !show;
-  if (show) { $('#tune').hidden = true; renderMonitor(); }
+  if (show) {
+    $('#tune').hidden = true;
+    if (!$('#mon-live')) $('#mon-body').innerHTML = `<div id="mon-live" class="mon-live"></div>${MON_GUIDE}`;
+    renderMonitor();
+  }
 }
 
 if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded', () => {
   const body = $('#mon-body');
   body.addEventListener('mousemove', (e) => {
+    if (!e.target.closest('#mon-live')) return;
     const plot = e.target.closest('.ch-plot');
     if (!plot) { if (MON.hover) { MON.hover = null; renderMonitor(); } return; }
     const r = plot.getBoundingClientRect();
     MON.hover = { key: plot.dataset.chart, frac: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) };
     renderMonitor();
   });
-  body.addEventListener('mouseleave', () => { MON.hover = null; renderMonitor(); });
+  body.addEventListener('mouseleave', () => { if (MON.hover) { MON.hover = null; renderMonitor(); } });
   body.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-mon-unload]');
     if (!b) return;
