@@ -1,0 +1,36 @@
+[package]
+name = "hush"
+version = "0.1.0"
+description = "Private, offline-first desktop app for local LLMs (Ollama)"
+authors = ["Hush contributors"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "hush_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# No TLS on purpose: the app only ever talks plain HTTP to Ollama on 127.0.0.1.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+futures-util = "0.3"
+tokio = { version = "1", features = ["sync", "macros"] }
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+zeroize = "1"
+base64 = "0.22"
+pdf-extract = "0.7"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
