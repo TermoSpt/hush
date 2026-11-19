@@ -57,7 +57,7 @@ async function benchAsk(model, prompt, think, opts = {}) {
   const body = {
     model,
     messages: opts.messages || [{ role: 'user', content: prompt }],
-    options: { temperature: opts.temperature ?? 0, seed: 42, num_ctx: think ? 8192 : 4096, num_predict: think ? 4096 : (opts.maxTokens || 500) },
+    options: { temperature: opts.temperature ?? 0, seed: 42, num_ctx: opts.numCtx || (think ? 8192 : 4096), num_predict: think ? 4096 : (opts.maxTokens || 500) },
     keep_alive: '5m',
   };
   if (thinkCap) body.think = !!think;

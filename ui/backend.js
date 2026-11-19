@@ -111,7 +111,7 @@ const Backend = (() => {
     vaultDestroy: async () => { fakeVault = null; unlocked = false; },
     gpuInfo: async () => {
       const v = parseFloat(params.get('vram'));
-      return v ? [{ name: 'Dev GPU', total_mb: Math.round(v * 1024), used_mb: 900, util_pct: Math.round(20 + Math.random() * 70), temp_c: 54 }] : [];
+      return v ? [{ name: 'Dev GPU', total_mb: Math.round(v * 1024), used_mb: 8600, util_pct: Math.round(20 + Math.random() * 70), temp_c: 61, mem_util_pct: Math.round(30 + Math.random() * 40), power_w: 90 + Math.random() * 80, power_limit_w: 200, clock_mhz: 2610, clock_max_mhz: 3105, fan_pct: 38 }] : [];
     },
     ollamaEnv: async () => ({ ...devEnv }),
     setOllamaEnv: async (name, value) => { if (value) devEnv[name] = value; else delete devEnv[name]; },

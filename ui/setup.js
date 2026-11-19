@@ -13,9 +13,10 @@ const SETUP_ITEMS = [
   { name: 'OLLAMA_FLASH_ATTENTION', title: 'Flash attention', rec: '1', good: isOn,
     show: (v) => (isOn(v) ? 'On' : v ? 'Off' : 'Not set (Ollama decides)'),
     why: 'A faster way of handling long conversations, and required for the memory-saving setting below. Safe on NVIDIA cards.' },
-  { name: 'OLLAMA_KV_CACHE_TYPE', title: 'Conversation memory format', rec: 'q8_0', good: (v) => v === 'q8_0' || v === 'q4_0',
-    show: (v) => v || 'f16 (default)',
-    why: 'q8_0 halves the memory each conversation needs with almost no quality loss, so you get about twice the context on the same card. Needs flash attention on.' },
+  { name: 'OLLAMA_KV_CACHE_TYPE', title: 'Conversation memory format', rec: 'q8_0', good: (v) => ['q8_0', 'q4_0', 'f16'].includes(v),
+    show: (v) => (v === 'f16' ? 'f16 (chosen for speed)' : v || 'f16 (default)'),
+    alt: { 'q8_0': ['f16', 'Prefer speed (f16)'], f16: ['q8_0', 'Prefer memory (q8_0)'] },
+    why: 'A trade-off. q8_0 halves the memory each conversation needs (about twice the context on the same card) with almost no quality loss, but it can be slightly slower on some cards. f16 is the fastest when your models already fit comfortably. Needs flash attention on.' },
   { name: 'OLLAMA_NUM_PARALLEL', title: 'Parallel requests', rec: '1', good: (v) => !v || v === '1',
     show: (v) => v || 'Not set (Ollama decides)',
     why: 'Every parallel slot reserves its own conversation memory. For one person on one PC, 1 is best: more room for context.' },
@@ -75,7 +76,8 @@ async function renderSetupSheet() {
     const v = ENV[it.name] || '';
     const good = it.good(v);
     html += row(good, `${it.title}: ${esc(it.show(v))}`, `${esc(it.why)} <span class="mono">${it.name}</span>`,
-      good ? '' : `<button class="btn small" data-env="${it.name}" data-val="${it.rec}" type="button">Use recommended</button>`);
+      good ? (it.alt && it.alt[v] ? `<button class="btn small ghost" data-env="${it.name}" data-val="${it.alt[v][0]}" type="button">${it.alt[v][1]}</button>` : '')
+        : `<button class="btn small" data-env="${it.name}" data-val="${it.rec}" type="button">Use recommended</button>`);
   }
   const ctxEnv = ENV.OLLAMA_CONTEXT_LENGTH;
   html += row(null, `Default context length: ${ctxEnv ? fmtInt(ctxEnv) : 'not set'}`, 'Hush sends the context size for every chat itself (Tune → "How much it remembers"), so you don\'t need this setting. It only affects other apps and the terminal.');

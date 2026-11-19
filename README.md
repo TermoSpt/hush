@@ -9,6 +9,8 @@ Hush sits on top of [Ollama](https://ollama.com) (which runs the models) and add
 ## What it does
 
 - **Memory gauge that tells the truth.** Before you send, it estimates model + conversation memory + working space + what other apps use, against your real GPU memory (with a safety margin). After the first reply it switches to the number Ollama actually measured. On Windows it also watches "shared GPU memory", so it catches the driver quietly moving the model into normal RAM. Task Manager can then show more than your card has, and replies crawl.
+- **Live monitor.** One panel for everything happening while you prompt: writing speed, compute load, graphics memory, memory bus, temperature, power, and two-minute charts of each. It also breaks down the last reply (load, reading speed, writing speed, time to first word) and gives a plain-language diagnosis such as "12% of the model runs on the CPU".
+- **Memory-full handling.** A banner warns when the conversation is about to outgrow the model's memory. It offers to **summarize into a new chat** (carrying the important parts forward) or to add more memory. Messages the model can no longer see are dimmed behind a clear "out of memory" line, and you're asked before sending a message that won't fit.
 - **Live progress.** While it works: loading, reading your prompt, thinking, answering, with a timer and tokens per second, and a plain explanation when it's slow.
 - **Live hardware strip.** GPU memory, load, temperature and the loaded model, always visible in the sidebar.
 - **Roles.** Ten built-in roles (developer, code reviewer, debugger, editor, explain-it-simply, translator, analyst, and more), plus your own saved roles. It warns when a role is too big for the memory setting.
@@ -25,6 +27,15 @@ Hush sits on top of [Ollama](https://ollama.com) (which runs the models) and add
 - **Two session modes.** *Ephemeral*: nothing ever touches the disk. *Encrypted vault*: chats are saved in one encrypted file.
 - **Wipe in one click** (Ctrl+Shift+L). Erases or locks the session, unloads models from GPU memory and clears the clipboard.
 - **Data map.** Lists every file Hush *and Ollama* keep on your PC, including Ollama's logs and its plain-text terminal prompt history, and lets you shred them.
+
+## Light on your PC
+
+Hush is meant to leave as much of your hardware as possible to the model:
+
+- **No graphics memory for the interface.** Hush draws its own window on the CPU (WebView2 with GPU acceleration off), so it doesn't hold the 100–200 MB of graphics memory a window like this normally takes.
+- **Quiet when idle.** Hardware checks run every 5 seconds when nothing is happening, every second only while a model is answering or the Monitor is open, and the Windows overflow counter only while a model is loaded. Nothing runs while the window is minimized.
+- **Cheap streaming.** Long answers redraw less often as they grow, and charts are only drawn while the Monitor is open.
+- **Small.** No frameworks and no bundled browser. The installer is a few MB, and nothing runs in the background after you close it.
 
 ## Privacy, precisely
 
@@ -77,6 +88,10 @@ python -m http.server -d ui 8765
 
 In a normal browser the UI runs in "dev mode": it talks to Ollama directly and uses a fake, **unencrypted** in-memory vault.
 
+### Releasing
+
+Push a tag (`git tag v0.1.0 && git push --tags`). GitHub Actions builds Windows, macOS and Linux installers and attaches them to a draft release.
+
 ## Layout
 
 ```
@@ -85,6 +100,7 @@ ui/                 the interface: plain HTML/CSS/JS, no build step, no dependen
   roles.js          built-in roles, by category
   bench.js          test bench, judge review, fact-check prompt
   setup.js          setup check, models folder, fit calculator
+  monitor.js        live monitor panel
   office.js         text from .docx / .xlsx / .pptx (built-in unzip, no libraries)
   estimate.js       GPU memory estimator (weights + KV cache + buffers)
   markdown.js       small, safe markdown renderer

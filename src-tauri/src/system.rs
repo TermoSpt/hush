@@ -50,6 +50,12 @@ pub struct GpuInfo {
     used_mb: u64,
     util_pct: Option<u64>,
     temp_c: Option<u64>,
+    mem_util_pct: Option<u64>,
+    power_w: Option<f64>,
+    power_limit_w: Option<f64>,
+    clock_mhz: Option<u64>,
+    clock_max_mhz: Option<u64>,
+    fan_pct: Option<u64>,
 }
 
 #[tauri::command]
@@ -127,12 +133,13 @@ fn query_shared() -> Option<SharedMem> {
         })
 }
 
+const NVIDIA_FIELDS: &str = "name,memory.total,memory.used,utilization.gpu,temperature.gpu,utilization.memory,power.draw,power.limit,clocks.sm,clocks.max.sm,fan.speed";
+const NVIDIA_NUMERIC: usize = 10;
+
 fn query_nvidia() -> Vec<GpuInfo> {
     let mut cmd = Command::new("nvidia-smi");
-    cmd.args([
-        "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
-        "--format=csv,noheader,nounits",
-    ]);
+    cmd.arg(format!("--query-gpu={NVIDIA_FIELDS}"))
+        .arg("--format=csv,noheader,nounits");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -146,22 +153,36 @@ fn query_nvidia() -> Vec<GpuInfo> {
     }
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(|line| {
-            let mut parts = line.rsplitn(5, ',');
-            let temp_c = parts.next()?.trim().parse().ok();
-            let util_pct = parts.next()?.trim().parse().ok();
-            let used_mb = parts.next()?.trim().parse().ok()?;
-            let total_mb = parts.next()?.trim().parse().ok()?;
-            let name = parts.next()?.trim().to_string();
-            Some(GpuInfo {
-                name,
-                total_mb,
-                used_mb,
-                util_pct,
-                temp_c,
-            })
-        })
+        .filter_map(parse_nvidia_line)
         .collect()
+}
+
+/// Parses one CSV line from nvidia-smi. Fields some cards don't report come
+/// back as "[N/A]" or "[Not Supported]" and become None.
+fn parse_nvidia_line(line: &str) -> Option<GpuInfo> {
+    let parts: Vec<&str> = line.split(',').map(|p| p.trim()).collect();
+    if parts.len() < NVIDIA_NUMERIC + 1 {
+        return None;
+    }
+    // The name comes first and could in theory contain commas.
+    let split = parts.len() - NVIDIA_NUMERIC;
+    let name = parts[..split].join(",");
+    let n = &parts[split..];
+    let int = |s: &str| s.parse::<f64>().ok().map(|v| v.round() as u64);
+    let float = |s: &str| s.parse::<f64>().ok();
+    Some(GpuInfo {
+        name,
+        total_mb: int(n[0])?,
+        used_mb: int(n[1])?,
+        util_pct: int(n[2]),
+        temp_c: int(n[3]),
+        mem_util_pct: int(n[4]),
+        power_w: float(n[5]),
+        power_limit_w: float(n[6]),
+        clock_mhz: int(n[7]),
+        clock_max_mhz: int(n[8]),
+        fan_pct: int(n[9]),
+    })
 }
 
 // ---------------------------------------------------------------- data map
@@ -370,6 +391,29 @@ pub async fn shred_files(app: AppHandle, paths: Vec<String>) -> Result<Vec<Shred
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_nvidia_line;
+
+    #[test]
+    fn parses_nvidia_smi() {
+        let g = parse_nvidia_line(
+            "NVIDIA GeForce RTX 4070, 12282, 8601, 97, 66, 41, 182.35, 200.00, 2745, 3105, 52",
+        )
+        .unwrap();
+        assert_eq!(g.name, "NVIDIA GeForce RTX 4070");
+        assert_eq!((g.total_mb, g.used_mb, g.util_pct), (12282, 8601, Some(97)));
+        assert_eq!(g.power_w, Some(182.35));
+        let laptop = parse_nvidia_line(
+            "NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 512, 0, 45, 0, [N/A], [N/A], 210, 3105, [N/A]",
+        )
+        .unwrap();
+        assert_eq!(laptop.power_w, None);
+        assert_eq!(laptop.fan_pct, None);
+        assert!(parse_nvidia_line("garbage").is_none());
+    }
 }
 
 // ---------------------------------------------------------------- PDF

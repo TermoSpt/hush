@@ -1,5 +1,5 @@
 'use strict';
-/* global MD, Est, Backend, Office, ROLE_CATS, PRESETS, renderBenchSheet, renderSetupSheet, reviewMessage, factCheckMessage, reviewHtml, detectOllamaEnv, modelsExtrasHtml, updateCalc, fillStorage, loadEnv, ENV */
+/* global MD, Est, Backend, Office, ROLE_CATS, PRESETS, renderBenchSheet, renderSetupSheet, toggleMonitor, recordMonitorSample, benchAsk, reviewMessage, factCheckMessage, reviewHtml, detectOllamaEnv, modelsExtrasHtml, updateCalc, fillStorage, loadEnv, ENV */
 
 // =====================================================================
 // helpers
@@ -230,6 +230,13 @@ async function refreshGpu() {
 async function refreshShared() {
   try { S.shared = await Backend.gpuShared(); } catch (_) { S.shared = null; }
   if (S.shared && !S.ps.length && !S.gen) S.sharedBaseline = S.shared.shared_mb;
+  if (overflowGB() > 1) { if (!S.overflowSince) S.overflowSince = Date.now(); }
+  else S.overflowSince = null;
+}
+// 'none' | 'spike' (brief, normal while a model loads) | 'sustained' (a real problem)
+function overflowState() {
+  if (!S.overflowSince) return 'none';
+  return Date.now() - S.overflowSince > 15000 && !(S.gen && !S.ps.length) ? 'sustained' : 'spike';
 }
 // GB of model data that has overflowed into system RAM through the Windows driver.
 function overflowGB() {
@@ -319,9 +326,10 @@ function memState(model, ctx) {
     status = ratio <= Est.OK_RATIO ? 'ok' : ratio <= Est.TIGHT_RATIO ? 'tight' : 'spill';
     gpuShare = Math.max(0, Math.min(1, free / total));
   }
-  const overflow = actual ? overflowGB() : 0;
+  const ovState = actual ? overflowState() : 'none';
+  const overflow = ovState === 'sustained' ? overflowGB() : 0;
   if (actual && (actual.gpuPct < 95 || overflow > 1)) status = 'spill';
-  return { est, budget, status, gpuShare, actual, measured, total, overflow };
+  return { est, budget, status, gpuShare, actual, measured, total, overflow, ovState };
 }
 
 function maxCtxFor(model) {
@@ -413,7 +421,7 @@ function ctxUsage(chat) {
 
 // ---------------------------------------------------------------- sending
 async function send() {
-  if (S.gen) return;
+  if (S.gen) { toast('Still answering. Wait for it to finish, or press Stop (Esc).'); return; }
   let chat = activeChat();
   if (!chat) chat = newChat();
   const text = $('#input').value.trim();
@@ -425,6 +433,16 @@ async function send() {
   if (images.length && !capabilities(chat.model).includes('vision')) {
     toast(`${chat.model} can't see images. Pick a model tagged "vision", or remove the image.`, 'bad');
     return;
+  }
+  const u = ctxUsage(chat);
+  if (u.used > u.limit && !chat.overflowAck) {
+    const ok = await modal({
+      title: 'This chat is out of memory',
+      body: `With this message the chat needs about <b>${fmtInt(u.used)}</b> tokens, but the model can only hold <b>${fmtInt(u.limit)}</b>. If you send it, the model will <b>forget the oldest messages</b>, including any files, code or decisions in them. They stay visible here for you, but the model won't see them.<br><br>Better options: <b>Summarize into new chat</b> (carries the important parts forward) or give it more memory in Tune.`,
+      okText: 'Send anyway', cancelText: 'Go back',
+    });
+    if (!ok) return;
+    chat.overflowAck = true;
   }
   const msg = {
     id: uid(), role: 'user', content: text,
@@ -478,6 +496,7 @@ async function generate(chat) {
       }
       if (ev.done) {
         gotDone = true;
+        if ((ev.prompt_eval_count || 0) + (ev.eval_count || 0) >= Number(chat.settings.num_ctx) * 0.98) asst.overflowed = true;
         asst.stats = {
           prompt_eval_count: ev.prompt_eval_count, prompt_eval_duration: ev.prompt_eval_duration,
           eval_count: ev.eval_count, eval_duration: ev.eval_duration,
@@ -496,6 +515,7 @@ async function generate(chat) {
     delete asst.live;
     S.loadedCtx[chat.model] = Number(chat.settings.num_ctx);
     S.gen = null;
+    if (!asst.error && asst.content && !S.prefs.tipReviewSeen) asst.showTip = true;
     chat.updated = Date.now();
     if (chat.id === S.activeId) renderMessages(false);
     renderComposerState();
@@ -539,7 +559,10 @@ function stop() {
 let streamFrame = null;
 function scheduleStreamRender(m) {
   if (streamFrame) return;
-  streamFrame = requestAnimationFrame(() => {
+  // Re-rendering markdown costs more as the answer grows, so long answers refresh less often.
+  const len = m.content.length + (m.thinking || '').length;
+  const wait = len > 40000 ? 400 : len > 12000 ? 200 : 70;
+  streamFrame = setTimeout(() => {
     streamFrame = null;
     if (!S.gen || S.gen.chatId !== S.activeId) return;
     const node = $(`.msg[data-id="${m.id}"]`);
@@ -547,10 +570,30 @@ function scheduleStreamRender(m) {
     const box = $('#messages');
     const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
     const bubble = $('.bubble', node);
-    bubble.innerHTML = assistantBody(m);
-    bubble.classList.toggle('cursor', !!m.pending && !!splitThink(m.content).body);
+    const t = splitThink(m.content);
+    const thinking = (m.thinking || '') + t.think;
+    const det = $('details.think', bubble);
+    const ans = $('.answer', bubble);
+    if ((thinking && !det) || !ans) {
+      bubble.innerHTML = assistantBody(m);
+    } else {
+      if (det) {
+        // Update the thinking text without rebuilding the box, so its own scroll
+        // position survives. It only follows new text if you're at its bottom.
+        const tb = $('.think-body', det);
+        const atBottom = tb.scrollHeight - tb.scrollTop - tb.clientHeight < 40;
+        if (tb.textContent.length !== thinking.length) {
+          tb.textContent = thinking;
+          if (atBottom) tb.scrollTop = tb.scrollHeight;
+        }
+        $('summary', det).textContent = thinkSummary(m, thinking, t.body);
+        if (t.body && det.open && !m.thinkTouched) { det.dataset.prog = '1'; det.open = false; }
+      }
+      ans.innerHTML = answerHtml(m, t.body, thinking);
+    }
+    bubble.classList.toggle('cursor', !!m.pending && !!t.body);
     if (stick) box.scrollTop = box.scrollHeight;
-  });
+  }, wait);
 }
 
 // =====================================================================
@@ -663,6 +706,15 @@ function renderCtxBar() {
   if (u.used > u.limit) label += ' · the oldest messages no longer fit and will be cut off. Raise the context or start a new chat.';
   else if (pct > 85) label += ' · almost full';
   bar.innerHTML = `<span>${label}</span><span class="ctx-track"><span class="ctx-fill" style="width:${pct}%"></span></span>`;
+  const ban = $('#ctx-banner');
+  if (pct > 85 && chat.messages.length) {
+    const over = u.used > u.limit;
+    ban.hidden = false;
+    ban.className = `ctx-banner${over ? ' bad' : ''}`;
+    ban.innerHTML = `<span><b>${over ? 'Memory full.' : 'Memory almost full.'}</b> ${over ? 'The model is forgetting the oldest messages (and any progress in them).' : 'Soon the model will start forgetting the oldest messages.'}</span>
+      <span class="ctx-acts">${chat.summarizing ? '<span class="live-status"><span class="live-dot"></span>Summarizing…</span>'
+        : '<button class="btn small primary" data-ctx="summarize" type="button" title="The model writes a summary; a new chat starts from it">Summarize into new chat</button><button class="btn small" data-ctx="more" type="button">More memory</button><button class="btn small ghost" data-ctx="new" type="button">New chat</button>'}</span>`;
+  } else ban.hidden = true;
 }
 
 function fmtStats(m) {
@@ -681,20 +733,30 @@ function fmtStats(m) {
   return html;
 }
 
+function thinkSummary(m, thinking, body) {
+  const live = m.pending && !body;
+  const words = thinking.trim().split(/\s+/).length;
+  return `${live ? 'Thinking…' : 'Thought process'} · ${fmtInt(words)} words${live ? ' (scroll inside to read along)' : ''}`;
+}
+
+function answerHtml(m, body, thinking) {
+  if (body) return MD.render(body);
+  if (m.pending && !thinking) return '<div class="waiting"></div>';
+  return '';
+}
+
 function assistantBody(m) {
   const t = splitThink(m.content);
   const thinking = (m.thinking || '') + t.think;
   const body = t.body;
   let html = '';
   if (thinking) {
-    const live = m.pending && !body;
-    const open = live || m.thinkOpen;
-    const words = thinking.trim().split(/\s+/).length;
-    html += `<details class="think"${open ? ' open' : ''} data-msg="${m.id}"><summary>${live ? 'Thinking…' : 'Thought process'} · ${fmtInt(words)} words</summary><div class="think-body">${esc(thinking)}</div></details>`;
+    const open = m.thinkTouched ? m.thinkOpen : (m.pending && !body);
+    html += `<details class="think"${open ? ' open' : ''} data-msg="${m.id}"><summary>${esc(thinkSummary(m, thinking, body))}</summary><div class="think-body">${esc(thinking)}</div></details>`;
   }
-  if (body) html += MD.render(body);
-  else if (m.pending && !thinking) html += '<div class="waiting"></div>';
+  html += `<div class="answer">${answerHtml(m, body, thinking)}</div>`;
   if (m.stopped && !m.pending) html += '<div class="msg-meta"><span class="warn">Stopped</span></div>';
+  if (m.overflowed && !m.pending) html += '<div class="note warn" style="margin-top:8px">Memory filled up during this answer, so the model dropped the start of the conversation to keep going. Consider <b>Summarize into new chat</b>.</div>';
   if (m.error) html += `<div class="err">${esc(m.error)}</div>`;
   return html;
 }
@@ -704,15 +766,16 @@ function messageHtml(m, isLast) {
   let files = '';
   if (m.images && m.images.length) files += m.images.map((i) => `<img src="data:${esc(i.mime || 'image/png')};base64,${i.b64}" alt="${esc(i.name || 'image')}">`).join('');
   if (m.files && m.files.length) files += m.files.map((f) => `<span class="file-chip">📄 ${esc(f.name)} · ${fmtInt(estTokens(f.text))} tokens</span>`).join('');
-  const body = user ? esc(m.content) : assistantBody(m);
+  const body = user ? (m.summary ? `<div class="md-in-user">${MD.render(m.content)}</div>` : esc(m.content)) : assistantBody(m);
   const actions = user
     ? '<button data-act="edit" type="button">Edit</button><button data-act="copy" type="button">Copy</button><button data-act="del" type="button">Delete</button>'
-    : `<button data-act="copy" type="button">Copy</button>${m.content && !m.error ? '<button data-act="review" type="button" title="Ask another local model to check this answer">Review</button><button data-act="factcheck" type="button" title="Copy a ready-made prompt for an online assistant">Fact-check online</button>' : ''}${isLast ? '<button data-act="regen" type="button">Regenerate</button>' : ''}<button data-act="del" type="button">Delete</button>`;
+    : m.synthetic ? '<button data-act="del" type="button">Delete</button>' : `<button data-act="copy" type="button">Copy</button>${m.content && !m.error ? '<button data-act="review" class="pill" type="button" title="Ask another local model to check this answer">✓ Review</button><button data-act="factcheck" class="pill" type="button" title="Copy a ready-made prompt for an online assistant">⧉ Fact-check online</button>' : ''}${isLast ? '<button data-act="regen" type="button">Regenerate</button>' : ''}<button data-act="del" type="button">Delete</button>`;
   const who = user ? 'You' : esc(m.model || 'Assistant');
   return `<div class="msg ${m.role}" data-id="${m.id}"><div class="avatar">${user ? 'you' : 'ai'}</div><div>` +
     `<div class="who">${who}</div>${files ? `<div class="msg-files">${files}</div>` : ''}` +
     `<div class="bubble${!user && m.pending && splitThink(m.content).body ? ' cursor' : ''}">${body}</div>` +
     (m.review ? reviewHtml(m) : '') +
+    (m.showTip && !S.prefs.tipReviewSeen ? '<div class="tip-inline"><span>💡 <b>Not sure it\'s right?</b> Use <b>Review</b> to have another local model check this answer, or <b>Fact-check online</b> to copy a ready-made prompt for an online assistant. The buttons are just below.</span><button class="btn small" data-act="tip-ok" type="button">Got it</button></div>' : '') +
     `<div class="msg-meta">${m.pending ? `<span class="live-status" data-live="${m.id}">${liveStatus(m)}</span>` : `${user ? '' : fmtStats(m)}<span class="msg-actions">${actions}</span>`}</div></div></div>`;
 }
 
@@ -726,6 +789,53 @@ function emptyState() {
     '<div class="tip"><b>Tune per chat</b>Context size, creativity, thinking and a system prompt. Every setting says what it does.</div>' +
     '<div class="tip"><b>Wipe in one click</b>Ctrl+Shift+L clears the session, unloads the model from GPU memory and empties the clipboard.</div>' +
     '</div>' + roleChips() + '</div>';
+}
+
+// Index of the last message the model can no longer see (estimate), or -1.
+function forgottenUpTo(chat) {
+  const limit = Number(chat.settings.num_ctx) || 8192;
+  let budget = limit - estTokens(chat.settings.system) - 256;
+  const msgs = chat.messages;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.pending) continue;
+    const t = estTokens(m.role === 'assistant' ? splitThink(m.content).body : apiContent(m)) + (m.images ? m.images.length * 768 : 0);
+    budget -= t;
+    if (budget < 0) return i;
+  }
+  return -1;
+}
+
+const SUMMARY_PROMPT = 'Write a summary of our conversation so far that I can paste into a new chat to continue the work. Include: the goal, key facts and decisions, any important code, data or file contents (quote what matters), the current state, and open questions or next steps. Be complete but concise. Use headings and bullet points.';
+
+async function summarizeToNewChat() {
+  const chat = activeChat();
+  if (!chat || S.gen || !chat.messages.length || chat.summarizing) return;
+  chat.summarizing = true;
+  renderCtxBar();
+  try {
+    const r = await benchAsk(chat.model, '', false, {
+      messages: [...toApiMessages(chat), { role: 'user', content: SUMMARY_PROMPT }],
+      temperature: 0.2, maxTokens: 2000, numCtx: Number(chat.settings.num_ctx),
+    });
+    if (!r.content.trim()) throw new Error('The model returned an empty summary.');
+    const old = chat;
+    const nc = newChat();
+    nc.model = old.model;
+    nc.settings = clone(old.settings);
+    nc.title = `↪ ${old.title}`.slice(0, 60);
+    nc.messages.push(
+      { id: uid(), role: 'user', summary: true, content: `Summary of our previous chat ("${old.title}"):\n\n${r.content}`, images: [], files: [] },
+      { id: uid(), role: 'assistant', model: 'Hush', synthetic: true, content: "Got it. I've read the summary of our previous chat. What would you like to do next?" },
+    );
+    toast('New chat started with a summary of the old one. The old chat is still in the sidebar.', 'ok');
+  } catch (e) {
+    toast(`Couldn't summarize: ${errText(e)}`, 'bad');
+  } finally {
+    delete chat.summarizing;
+    renderAll();
+    persist();
+  }
 }
 
 function roleCats() {
@@ -751,7 +861,12 @@ function renderMessages(scrollToEnd) {
   const chat = activeChat();
   if (!chat || !chat.messages.length) { box.innerHTML = emptyState(); renderCtxBar(); return; }
   const lastAsst = [...chat.messages].reverse().find((m) => m.role === 'assistant');
-  box.innerHTML = chat.messages.map((m) => messageHtml(m, lastAsst && m.id === lastAsst.id && m === chat.messages[chat.messages.length - 1])).join('');
+  const cut = forgottenUpTo(chat);
+  box.innerHTML = chat.messages.map((m, i) => {
+    const html = messageHtml(m, lastAsst && m.id === lastAsst.id && m === chat.messages[chat.messages.length - 1]);
+    const dimmed = i <= cut ? html.replace('class="msg ', 'class="msg forgotten ') : html;
+    return i === cut ? dimmed + `<div class="forget-line"><span>↑ Out of the model's memory: it can no longer see the ${cut + 1} message${cut ? 's' : ''} above (they stay here for you)</span></div>` : dimmed;
+  }).join('');
   if (scrollToEnd) box.scrollTop = box.scrollHeight;
   renderCtxBar();
 }
@@ -951,7 +1066,7 @@ function renderMemCard() {
   if (!chat.model) { card.innerHTML = '<span class="help">Pick a model to see its memory use.</span>'; return; }
   const ms = memState(chat.model, chat.settings.num_ctx);
   if (!ms) { card.innerHTML = '<span class="help">Waiting for model details…</span>'; return; }
-  const { est, budget, status, actual, measured, total, overflow } = ms;
+  const { est, budget, status, actual, measured, total, overflow, ovState } = ms;
   const k = est.total ? total / est.total : 1;
   const adv = S.prefs.tuneMode === 'advanced';
   let html = `<div class="mem-status ${status}">${STATUS_LONG[status]}</div>`;
@@ -972,6 +1087,8 @@ function renderMemCard() {
   if (overflow > 1) {
     html += `<div class="note bad"><b>Windows moved ≈ ${overflow.toFixed(1)} GB into normal RAM</b> ("shared GPU memory"). Ollama can't see this, and it's why replies crawl. Lower "How much it remembers", pick a smaller model, or close other apps using the graphics card.` +
       (adv ? '<br><br>To get a clear error instead of a silent slowdown: NVIDIA Control Panel → Manage 3D settings → CUDA – Sysmem Fallback Policy → <i>Prefer No Sysmem Fallback</i>.' : '') + '</div>';
+  } else if (ovState === 'spike') {
+    html += '<div class="note">Brief jump in shared memory: while a model loads, its data passes through normal RAM on the way to the graphics card. Task Manager can show more than your card has for a few seconds. That\'s normal. Hush only warns if it stays.</div>';
   } else if (status === 'spill' && !actual) {
     html += '<div class="note bad">This won\'t fit. Lower "How much it remembers", or pick a smaller model.' + (adv ? ' Switching the cache to q8_0 also helps (see This PC).' : '') + '</div>';
   } else if (status === 'tight') {
@@ -1109,7 +1226,7 @@ function toggleTune(force) {
   const t = $('#tune');
   const show = force !== undefined ? force : t.hidden;
   t.hidden = !show;
-  if (show) renderTune();
+  if (show) { $('#monitor').hidden = true; renderTune(); }
 }
 
 // =====================================================================
@@ -1600,9 +1717,10 @@ function bind() {
   const box = $('#messages');
   box.addEventListener('toggle', (e) => {
     if (e.target.matches('details.think')) {
+      if (e.target.dataset.prog) { delete e.target.dataset.prog; return; }
       const chat = activeChat();
       const m = chat && chat.messages.find((x) => x.id === e.target.dataset.msg);
-      if (m && !m.pending) m.thinkOpen = e.target.open;
+      if (m) { m.thinkTouched = true; m.thinkOpen = e.target.open; }
     }
   }, true);
   box.addEventListener('click', async (e) => {
@@ -1632,6 +1750,7 @@ function bind() {
     if (act === 'review' && !(m.review && m.review.pending)) reviewMessage(chat, idx);
     if (act === 'factcheck') factCheckMessage(chat, idx);
     if (act === 'review-close') { delete m.review; renderMessages(false); persist(); }
+    if (act === 'tip-ok') { S.prefs.tipReviewSeen = true; delete m.showTip; renderMessages(false); persist(); }
     if (act === 'regen' && !S.gen) { chat.messages.splice(idx, 1); generate(chat); }
     if (act === 'edit' && !S.gen) {
       const bubble = $('.bubble', node);
@@ -1659,11 +1778,32 @@ function bind() {
   $('#send-btn').onclick = () => (S.gen ? stop() : send());
   $('#attach-btn').onclick = (e) => { e.stopPropagation(); toggleAttachPop(); };
   $('#attach-pop').addEventListener('click', (e) => {
-    if (e.target.closest('#pick-files')) { $('#attach-pop').hidden = true; $('#file-input').click(); }
+    const cat = e.target.closest('[data-accept]');
+    if (e.target.closest('#pick-files') || cat) {
+      $('#attach-pop').hidden = true;
+      $('#file-input').accept = cat ? cat.dataset.accept : '';
+      $('#file-input').click();
+    }
     e.stopPropagation();
   });
   document.addEventListener('click', () => { $('#attach-pop').hidden = true; });
-  $('#file-input').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
+  $('#file-input').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; e.target.accept = ''; };
+  $('#hw').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-unload]');
+    if (!b) return;
+    await Backend.post('/api/generate', { model: b.dataset.unload, keep_alive: 0 }).catch((err) => toast(errText(err), 'bad'));
+    await refreshPs(); renderHardware(); renderGauge();
+    toast(`${b.dataset.unload} unloaded. Its graphics memory is free again.`);
+  });
+  $('#monitor-toggle').onclick = () => toggleMonitor();
+  $('#monitor-close').onclick = () => toggleMonitor(false);
+  $('#ctx-banner').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-ctx]');
+    if (!b) return;
+    if (b.dataset.ctx === 'summarize') summarizeToNewChat();
+    if (b.dataset.ctx === 'new') { newChat(); renderAll(); persist(); }
+    if (b.dataset.ctx === 'more') { toggleTune(true); const r = $('#ctx-range'); if (r) { r.scrollIntoView({ block: 'center' }); r.focus(); } }
+  });
   $('#attachments').addEventListener('click', (e) => {
     const rm = e.target.closest('.rm');
     if (rm) { S.pending.splice(Number(rm.dataset.i), 1); renderAttachments(); }
@@ -1713,14 +1853,14 @@ function toggleAttachPop() {
       : known ? `<em class="bad">✗ ${esc(model)} can't see images. Pick a model tagged "vision".</em>` : '<em>Checking the model…</em>';
   pop.innerHTML = `<div class="ap-head"><button class="btn primary small" id="pick-files" type="button">Choose files…</button><span class="def">or drag files anywhere · paste screenshots with Ctrl+V</span></div>
     <div class="ap-grid">
-      <div><b>Images</b><span>PNG, JPG, WEBP, GIF, BMP</span>${img}</div>
-      <div><b>PDF</b><span>PDFs with real text. Scanned pages have none: screenshot them for a vision model instead.</span></div>
-      <div><b>Office</b><span>Word .docx, Excel .xlsx (as tables), PowerPoint .pptx (slide text). For old .doc/.xls/.ppt, save in the new format first.</span></div>
-      <div><b>Text &amp; data</b><span>TXT, Markdown, CSV, TSV, JSON, XML, HTML, YAML, TOML, INI, LOG, SRT and similar</span></div>
-      <div><b>Code</b><span>Python, JavaScript/TypeScript, Rust, Go, Java, C/C++, C#, PHP, Ruby, SQL, shell, PowerShell and most other source files</span></div>
+      <div data-accept="image/*" title="Choose images"><b>Images</b><span>PNG, JPG, WEBP, GIF, BMP</span>${img}</div>
+      <div data-accept=".pdf,application/pdf" title="Choose PDFs"><b>PDF</b><span>PDFs with real text. Scanned pages have none: screenshot them for a vision model instead.</span></div>
+      <div data-accept=".docx,.xlsx,.pptx" title="Choose Office files"><b>Office</b><span>Word .docx, Excel .xlsx (as tables), PowerPoint .pptx (slide text). For old .doc/.xls/.ppt, save in the new format first.</span></div>
+      <div data-accept=".txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.xml,.html,.htm,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.srt,.vtt,.rst" title="Choose text and data files"><b>Text &amp; data</b><span>TXT, Markdown, CSV, TSV, JSON, XML, HTML, YAML, TOML, INI, LOG, SRT and similar</span></div>
+      <div data-accept=".py,.js,.mjs,.ts,.tsx,.jsx,.rs,.go,.java,.kt,.c,.h,.cpp,.hpp,.cc,.cs,.php,.rb,.sql,.sh,.bash,.ps1,.bat,.cmd,.lua,.swift,.scala,.r,.vue,.svelte,.css,.scss" title="Choose code files"><b>Code</b><span>Python, JavaScript/TypeScript, Rust, Go, Java, C/C++, C#, PHP, Ruby, SQL, shell, PowerShell and most other source files</span></div>
       <div class="no"><b>Not supported yet</b><span>Audio, video, archives (.zip), programs, and pictures inside documents</span></div>
     </div>
-    <p class="def">Everything is read on this PC and added to your message as text. Files use the model's memory, so big ones need a bigger "How much it remembers".</p>`;
+    <p class="def">Click a box to browse for just that kind of file. Everything is read on this PC and added to your message as text. Files use the model's memory, so big ones need a bigger "How much it remembers".</p>`;
   pop.hidden = false;
 }
 
@@ -1744,6 +1884,7 @@ async function pollGpu() {
       if (S.utilHist.length > 60) S.utilHist.shift();
     }
     if (S.mode) renderHardware();
+    recordMonitorSample();
   } finally { gpuBusy = false; }
 }
 async function pollPs() {
@@ -1770,6 +1911,15 @@ function sparkline(values) {
   return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${pts}" /></svg>`;
 }
 
+// "unloads in 3:12" from Ollama's expires_at
+function unloadIn(p) {
+  if (!p.expires_at) return '';
+  const t = Date.parse(p.expires_at);
+  if (!t || t - Date.now() > 30 * 86400000) return 'stays loaded';
+  const sec = Math.max(0, Math.round((t - Date.now()) / 1000));
+  return `unloads in ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+
 function renderHardware() {
   const el = $('#hw');
   const g = S.gpu[0];
@@ -1777,14 +1927,16 @@ function renderHardware() {
   const used = g.used_mb / 1024;
   const total = g.total_mb / 1024;
   const pct = Math.min(100, (used / total) * 100);
-  const over = overflowGB();
+  const ov = overflowState();
   const name = g.name.replace(/^NVIDIA\s+/i, '').replace(/^GeForce\s+/i, '');
-  el.innerHTML = `<div class="hw-row"><span>${esc(name)}</span><span>${used.toFixed(1)} / ${total.toFixed(1)} GB</span></div>` +
+  const loaded = S.ps.map((p) => `<div class="hw-model"><div class="hw-row"><span class="mono" title="${esc(p.name)}">${esc(p.name)}</span><button class="linkish" data-unload="${esc(p.name)}" type="button" title="Free its graphics memory now">unload</button></div>` +
+    `<div class="hw-row dim"><span>${S.gen ? 'working' : 'idle · kept loaded'}</span><span>${esc(unloadIn(p))}</span></div></div>`).join('');
+  el.innerHTML = `<div class="hw-row"><b>${esc(name)}</b>${g.temp_c ? `<span>${g.temp_c}°C${g.power_w ? ` · ${Math.round(g.power_w)} W` : ''}</span>` : ''}</div>` +
+    `<div class="hw-row" title="Space reserved in the graphics card's memory. A loaded model keeps its space even while idle."><span>Memory</span><span>${used.toFixed(1)} / ${total.toFixed(1)} GB</span></div>` +
     `<div class="hw-bar"><span style="width:${pct}%" class="${pct > 95 ? 'hot' : ''}"></span></div>` +
-    (S.utilEma !== null ? `<div class="hw-row"><span title="Smoothed. The line shows the last 2 minutes">Load ${Math.round(S.utilEma)}%</span>${sparkline(S.utilHist)}</div>` : '') +
-    `<div class="hw-row dim"><span>${g.temp_c ? `${g.temp_c}°C` : ''}</span>` +
-    `<span>${S.ps.length ? `${esc(S.ps.map((p) => p.name).join(', '))} loaded` : 'no model loaded'}</span></div>` +
-    (over > 1 ? `<div class="hw-row bad">⚠ ${over.toFixed(1)} GB overflowed into RAM</div>` : '');
+    (S.utilEma !== null ? `<div class="hw-row" title="How hard the graphics card is working right now (smoothed). The line shows the last 2 minutes."><span>Compute ${Math.round(S.utilEma)}%</span>${sparkline(S.utilHist)}</div>` : '') +
+    (loaded || '<div class="hw-row dim"><span>No model loaded</span></div>') +
+    (ov === 'sustained' ? `<div class="hw-row bad">⚠ ${overflowGB().toFixed(1)} GB overflowed into RAM</div>` : ov === 'spike' ? '<div class="hw-row dim">↕ Loading through RAM (normal)</div>' : '');
 }
 
 function autoLockTick() {
@@ -1802,9 +1954,19 @@ async function boot() {
   const vs = await Backend.vaultStatus().catch(() => ({ exists: false }));
   showGate(vs.exists ? 'unlock' : 'welcome');
   refreshModels();
-  setInterval(pollGpu, 2000);
-  setInterval(pollPs, 3000);
-  setInterval(pollShared, 6000);
+  // One cheap 1-second tick decides what to refresh. Idle: every 5 s. While a model
+  // is answering or the Monitor is open: GPU every second. The Windows shared-memory
+  // counter (the most expensive check) only runs while a model is loaded.
+  let tick = 0;
+  setInterval(() => {
+    if (document.hidden || !S.mode) return;
+    tick++;
+    const busy = !!S.gen || !$('#monitor').hidden;
+    if (busy || tick % 5 === 0) pollGpu();
+    if (busy ? tick % 2 === 0 : tick % 5 === 0) pollPs();
+    if ((S.ps.length || S.gen) && tick % (busy ? 3 : 10) === 0) pollShared();
+  }, 1000);
+  pollShared();
   setInterval(() => { if (S.mode) refreshModels(); }, 30000);
   setInterval(autoLockTick, 20000);
 }

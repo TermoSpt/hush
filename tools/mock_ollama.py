@@ -220,9 +220,15 @@ class H(BaseHTTPRequestHandler):
                     load = 2_100_000_000
                 size = int(MODELS[name]["size"] + kv_estimate(name, ctx) + 0.6 * GB)
                 LOADED.clear()
-                LOADED[name] = {"size": size, "size_vram": min(size, VRAM_FREE), "context_length": ctx}
-                if b.get("think") not in (None, False) and "thinking" in MODELS[name]["caps"]:
-                    for w in "The user wants a comparison. I should keep it short and include a table and code.".split(" "):
+                expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 300))
+                LOADED[name] = {"size": size, "size_vram": min(size, VRAM_FREE), "context_length": ctx, "expires_at": expires}
+                last_msg = msgs[-1]["content"] if msgs else ""
+                wants_think = b.get("think") not in (None, False) or "think long" in last_msg
+                if wants_think and "thinking" in MODELS[name]["caps"]:
+                    think_text = "The user wants a comparison. I should keep it short and include a table and code."
+                    if "think long" in last_msg:
+                        think_text = " ".join(f"Step {i}: weighing option {i % 7} against the constraints and checking the numbers again." for i in range(120))
+                    for w in think_text.split(" "):
                         self.chunk({"model": name, "message": {"role": "assistant", "content": "", "thinking": w + " "}, "done": False})
                         time.sleep(0.02)
                 last = msgs[-1]["content"] if msgs else ""

@@ -28,6 +28,12 @@ When weights + cache + buffers exceed free GPU memory, Ollama keeps some layers 
 
 "Free" GPU memory also excludes what Windows and other apps use: typically 0.5–1.5 GB for the desktop, more with a browser playing video or a game open.
 
+## 2a. Memory isn't the same as work
+
+Graphics memory is *space*; compute is *work*. After a reply, Ollama keeps the model loaded (5 minutes by default) so the next answer starts instantly. During that time the card shows, for example, 8.4 of 12 GB used while compute sits near 0%. That's normal: the space is reserved, nothing is running. Hush shows when each model will unload and lets you unload it immediately.
+
+Brief spikes are also normal. While a model *loads*, its data passes through system RAM on the way to the card, so Task Manager can show more "GPU memory" than the card has for a few seconds. It's only a problem if it stays high, which Hush watches for (section 2b).
+
 ## 2b. Windows-only trap: "shared GPU memory"
 
 On Windows the NVIDIA driver can go further than Ollama does: when the card's own memory runs out, it quietly borrows normal system RAM ("Shared GPU memory" in Task Manager → Performance → GPU). Task Manager then shows *more* GPU memory in use than your card has (for example 18 GB on a 12 GB card), and everything slows to a crawl. Ollama doesn't see this happen.
@@ -52,14 +58,16 @@ Two more ways the context fills up without you noticing:
 - **Long system prompts / roles.** They're sent with every message. A 3,000-token master prompt in a 2,048-token context can't even be read in full.
 - **Thinking models** write their reasoning into the same context. Give them at least 8k, or turn thinking off for quick questions. Otherwise they run out of room mid-thought and keep discarding text, which is slow and confusing.
 
-## 4. The free upgrade: flash attention + 8-bit cache
+## 4. Flash attention + 8-bit cache: more memory, sometimes a little slower
 
 ```powershell
 setx OLLAMA_FLASH_ATTENTION 1
 setx OLLAMA_KV_CACHE_TYPE q8_0
 ```
 
-Then quit Ollama from the system tray and start it again. This roughly **halves** KV-cache memory with barely measurable quality loss, which means about twice the context in the same memory. `q4_0` quarters it but costs some quality on long contexts. Tell Hush which you use (Tune → This PC) so its estimates match.
+Then quit Ollama from the system tray and start it again (Hush's **Setup check** does this in one click). The 8-bit cache roughly **halves** conversation memory with barely measurable quality loss, which means about twice the context in the same memory.
+
+It's a trade-off, not a free lunch. On some cards the 8-bit cache makes reading and writing a little slower, because the card has to unpack it. If your models already fit comfortably, the f16 cache (Setup check → "Prefer speed") can be faster. Compare writing speed in the Monitor or on Test models with each setting. `q4_0` quarters it but costs some quality on long contexts. Tell Hush which you use (Tune → This PC) so its estimates match.
 
 ## 5. Quantization in one minute
 
