@@ -27,6 +27,7 @@ const Backend = (() => {
       vaultLock: () => inv('vault_lock'),
       vaultDestroy: () => inv('vault_destroy'),
       gpuInfo: () => inv('gpu_info'),
+      gpuShared: () => inv('gpu_shared'),
       dataMap: () => inv('data_map'),
       shredFiles: (paths) => inv('shred_files', { paths }),
       pdfText: (dataB64) => inv('extract_pdf_text', { dataB64 }),
@@ -107,7 +108,11 @@ const Backend = (() => {
     vaultDestroy: async () => { fakeVault = null; unlocked = false; },
     gpuInfo: async () => {
       const v = parseFloat(params.get('vram'));
-      return v ? [{ name: 'Dev GPU', total_mb: Math.round(v * 1024), used_mb: 900 }] : [];
+      return v ? [{ name: 'Dev GPU', total_mb: Math.round(v * 1024), used_mb: 900, util_pct: 37, temp_c: 54 }] : [];
+    },
+    gpuShared: async () => {
+      const sh = parseFloat(params.get('shared'));
+      return isNaN(sh) ? null : { dedicated_mb: 11800, shared_mb: Math.round(sh * 1024) };
     },
     dataMap: async () => [
       { id: 'hush-data', title: 'Hush: your vault', note: 'Browser dev mode: nothing is written to disk.', root: '(memory)', exists: true, deletable: false, summary_only: false, total_bytes: 0, file_count: 0, truncated: false, files: [] },

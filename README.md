@@ -8,7 +8,12 @@ Hush sits on top of [Ollama](https://ollama.com) (which runs the models) and add
 
 ## What it does
 
-- **Memory gauge.** Shows model weights, context memory (KV cache), working buffers and what other apps are using against your real GPU memory, *before* you send. It warns when a model will spill onto the CPU, then shows the real GPU/CPU split once the model is loaded.
+- **Memory gauge that tells the truth.** Before you send, it estimates model + conversation memory + working space + what other apps use, against your real GPU memory (with a safety margin). After the first reply it switches to the number Ollama actually measured. On Windows it also watches "shared GPU memory", so it catches the driver quietly moving the model into normal RAM. Task Manager can then show more than your card has, and replies crawl.
+- **Live progress.** While it works: loading, reading your prompt, thinking, answering, with a timer and tokens per second, and a plain explanation when it's slow.
+- **Live hardware strip.** GPU memory, load, temperature and the loaded model, always visible in the sidebar.
+- **Roles.** Ten built-in roles (developer, code reviewer, debugger, editor, explain-it-simply, translator, analyst, and more), plus your own saved roles. It warns when a role is too big for the memory setting.
+- **Simple and Advanced tuning.** Simple: how much it remembers, style (Precise / Balanced / Creative), thinking on/off, role. Advanced adds every sampling control, cache type, GPU size and the Ollama address.
+- **Per-model settings.** "Remember for this model" makes every new chat with that model start with your memory, style and thinking setup.
 - **Context you can see.** A slider with a "Fit to GPU" button, plus a bar showing how full the conversation is, so you notice before Ollama silently cuts off the start.
 - **Attachments.** Drag and drop or paste. Images go to vision models; code, text and PDFs go into your message.
 - **Per-chat tuning.** Temperature, Top P/K, Min P, repeat penalty, seed, max length, thinking on/off/effort, and a system prompt. Each one says in plain words what it does, and **auto** uses the model author's recommended value (shown under the slider).

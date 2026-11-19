@@ -48,6 +48,8 @@ pub struct GpuInfo {
     name: String,
     total_mb: u64,
     used_mb: u64,
+    util_pct: Option<u64>,
+    temp_c: Option<u64>,
 }
 
 #[tauri::command]
@@ -57,10 +59,78 @@ pub async fn gpu_info() -> Result<Vec<GpuInfo>, String> {
         .map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+pub struct SharedMem {
+    dedicated_mb: u64,
+    shared_mb: u64,
+}
+
+/// Windows only: how much of the main GPU's memory has overflowed into
+/// system RAM ("Shared GPU memory" in Task Manager). When this grows while a
+/// model is loaded, the NVIDIA driver is silently paging the model through
+/// system RAM, which is very slow and invisible to Ollama.
+#[tauri::command]
+pub async fn gpu_shared() -> Result<Option<SharedMem>, String> {
+    tauri::async_runtime::spawn_blocking(query_shared)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(windows))]
+fn query_shared() -> Option<SharedMem> {
+    None
+}
+
+#[cfg(windows)]
+fn query_shared() -> Option<SharedMem> {
+    use std::collections::HashMap;
+    use std::os::windows::process::CommandExt;
+
+    let script = "Get-Counter -Counter '\\GPU Adapter Memory(*)\\Dedicated Usage','\\GPU Adapter Memory(*)\\Shared Usage' -ErrorAction SilentlyContinue | ForEach-Object { $_.CounterSamples } | ForEach-Object { $_.Path + '|' + [uint64]$_.CookedValue }";
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // adapter instance -> (dedicated bytes, shared bytes)
+    let mut map: HashMap<String, (u64, u64)> = HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some((path, val)) = line.rsplit_once('|') else {
+            continue;
+        };
+        let Ok(val) = val.trim().parse::<u64>() else {
+            continue;
+        };
+        let p = path.trim().to_ascii_lowercase();
+        let (Some(a), Some(b)) = (p.find('('), p.rfind(')')) else {
+            continue;
+        };
+        if b <= a {
+            continue;
+        }
+        let entry = map.entry(p[a + 1..b].to_string()).or_insert((0, 0));
+        if p.ends_with("dedicated usage") {
+            entry.0 = val;
+        } else if p.ends_with("shared usage") {
+            entry.1 = val;
+        }
+    }
+    // The discrete GPU is the adapter using the most dedicated memory.
+    map.into_values()
+        .max_by_key(|v| v.0)
+        .map(|(d, s)| SharedMem {
+            dedicated_mb: d / 1_048_576,
+            shared_mb: s / 1_048_576,
+        })
+}
+
 fn query_nvidia() -> Vec<GpuInfo> {
     let mut cmd = Command::new("nvidia-smi");
     cmd.args([
-        "--query-gpu=name,memory.total,memory.used",
+        "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
         "--format=csv,noheader,nounits",
     ]);
     #[cfg(windows)]
@@ -77,7 +147,9 @@ fn query_nvidia() -> Vec<GpuInfo> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
-            let mut parts = line.rsplitn(3, ',');
+            let mut parts = line.rsplitn(5, ',');
+            let temp_c = parts.next()?.trim().parse().ok();
+            let util_pct = parts.next()?.trim().parse().ok();
             let used_mb = parts.next()?.trim().parse().ok()?;
             let total_mb = parts.next()?.trim().parse().ok()?;
             let name = parts.next()?.trim().to_string();
@@ -85,6 +157,8 @@ fn query_nvidia() -> Vec<GpuInfo> {
                 name,
                 total_mb,
                 used_mb,
+                util_pct,
+                temp_c,
             })
         })
         .collect()

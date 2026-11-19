@@ -21,6 +21,7 @@ pub fn run() {
             vault::vault_lock,
             vault::vault_destroy,
             system::gpu_info,
+            system::gpu_shared,
             system::data_map,
             system::shred_files,
             system::extract_pdf_text,

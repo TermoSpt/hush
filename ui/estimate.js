@@ -8,6 +8,9 @@ const Est = (() => {
   const GiB = 1024 ** 3;
   // Bytes per cached element for each OLLAMA_KV_CACHE_TYPE.
   const KV_BYTES = { f16: 2, q8_0: 34 / 32, q4_0: 18 / 32 };
+  // Share of free GPU memory we're happy to fill. Windows and the driver need headroom.
+  const OK_RATIO = 0.85;
+  const TIGHT_RATIO = 0.95;
   const CTX_STEPS = [2048, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144];
 
   function arch(modelInfo) {
@@ -48,7 +51,8 @@ const Est = (() => {
     const perToken = archInfo ? archInfo.elemsPerToken * bytesPer : 65536 * bytesPer;
     const gf = archInfo ? archInfo.globalFrac : 1;
     const kv = perToken * (gf * ctx + (1 - gf) * Math.min(ctx, archInfo ? archInfo.window || ctx : ctx));
-    const overhead = 0.4 * GiB + ctx * (flashAttention ? 6 : 28) * 1024;
+    // CUDA context + compute graph. Deliberately generous: under-estimating is what hurts.
+    const overhead = 0.75 * GiB + ctx * (flashAttention ? 8 : 32) * 1024;
     const raw = weightsBytes + kv + overhead;
     return {
       weights: weightsBytes,
@@ -65,7 +69,7 @@ const Est = (() => {
     let best = null;
     for (const c of CTX_STEPS) {
       if (maxCtx && c > maxCtx) break;
-      if (estimate({ ...opts, ctx: c }).total <= freeBytes * 0.92) best = c;
+      if (estimate({ ...opts, ctx: c }).total <= freeBytes * OK_RATIO) best = c;
     }
     return best;
   }
@@ -73,7 +77,7 @@ const Est = (() => {
   const fmtGB = (b) => (b / GiB >= 10 ? (b / GiB).toFixed(1) : (b / GiB).toFixed(2)) + ' GB';
   const pages = (tokens) => Math.max(1, Math.round((tokens * 0.75) / 500));
 
-  return { arch, estimate, fitCtx, fmtGB, pages, GiB, CTX_STEPS, KV_BYTES };
+  return { arch, estimate, fitCtx, fmtGB, pages, GiB, CTX_STEPS, KV_BYTES, OK_RATIO, TIGHT_RATIO };
 })();
 
 if (typeof module !== 'undefined') module.exports = Est;

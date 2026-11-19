@@ -28,6 +28,14 @@ When weights + cache + buffers exceed free GPU memory, Ollama keeps some layers 
 
 "Free" GPU memory also excludes what Windows and other apps use: typically 0.5–1.5 GB for the desktop, more with a browser playing video or a game open.
 
+## 2b. Windows-only trap: "shared GPU memory"
+
+On Windows the NVIDIA driver can go further than Ollama does: when the card's own memory runs out, it quietly borrows normal system RAM ("Shared GPU memory" in Task Manager → Performance → GPU). Task Manager then shows *more* GPU memory in use than your card has (for example 18 GB on a 12 GB card), and everything slows to a crawl. Ollama doesn't see this happen.
+
+Hush reads this counter and shows a red "overflowed into RAM" warning. Fixes, best first: lower the context ("How much it remembers"), use a smaller model, enable the q8_0 cache, or close other GPU-heavy apps. To get a clear error instead of a silent slowdown: NVIDIA Control Panel → Manage 3D settings → *CUDA – Sysmem Fallback Policy* → **Prefer No Sysmem Fallback**.
+
+Rule of thumb: keep the total under about 85% of the card. Windows itself uses 0.5–1.5 GB, and other apps can grab more at any time.
+
 ## 3. The context window is silently cut
 
 Ollama gives each request a fixed context size (`num_ctx`). When the conversation plus attachments is longer, the oldest tokens are dropped, with no error. Symptoms: the model "forgets" the start of the chat, ignores most of a pasted file, or loses its system prompt's instructions.
@@ -39,6 +47,10 @@ Ways to set it:
 - In a Modelfile: `PARAMETER num_ctx 16384`
 
 Per-request `num_ctx` always wins, which is why Hush sends it explicitly.
+
+Two more ways the context fills up without you noticing:
+- **Long system prompts / roles.** They're sent with every message. A 3,000-token master prompt in a 2,048-token context can't even be read in full.
+- **Thinking models** write their reasoning into the same context. Give them at least 8k, or turn thinking off for quick questions. Otherwise they run out of room mid-thought and keep discarding text, which is slow and confusing.
 
 ## 4. The free upgrade: flash attention + 8-bit cache
 

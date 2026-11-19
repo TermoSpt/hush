@@ -70,8 +70,10 @@ const readB64 = (file) => new Promise((resolve, reject) => {
 // =====================================================================
 const DEFAULT_CHAT = {
   num_ctx: 8192, temperature: null, top_p: null, top_k: null, min_p: null,
-  repeat_penalty: null, num_predict: null, seed: null, think: 'default', system: '',
+  repeat_penalty: null, num_predict: null, seed: null, think: 'default', system: '', presetId: '',
 };
+// Settings that belong to "how this model runs" (remembered per model), as opposed to the chat's role.
+const MODEL_KEYS = ['num_ctx', 'temperature', 'top_p', 'top_k', 'min_p', 'repeat_penalty', 'num_predict', 'seed', 'think'];
 const DEFAULT_PREFS = {
   defaults: clone(DEFAULT_CHAT),
   defaultModel: '',
@@ -81,7 +83,42 @@ const DEFAULT_PREFS = {
   vramOverrideGB: 0,
   ollamaUrl: '127.0.0.1:11434',
   autoLockMin: 15,
+  tuneMode: 'simple',
+  customPresets: [],     // [{ id, name, system }]
+  modelProfiles: {},     // model -> { num_ctx, temperature, ... }
 };
+
+// Built-in roles. `style` sets sampling; everything else stays on the model's own defaults.
+const PRESETS = [
+  { id: 'assistant', name: 'General assistant', style: 'balanced',
+    system: 'You are a helpful, precise assistant. Answer directly first, then add detail only if it helps. If you are not sure, say so instead of guessing.' },
+  { id: 'developer', name: 'Senior developer', style: 'precise',
+    system: 'You are a senior software engineer. Give working, idiomatic code with brief explanations. Point out edge cases, security issues and performance pitfalls. Ask for missing details only when they block a correct answer.' },
+  { id: 'reviewer', name: 'Code reviewer', style: 'precise',
+    system: 'Review the code the user provides. List concrete problems ordered by severity (bugs, security, correctness, then readability). For each, quote the line or snippet and suggest a fix. Do not rewrite the whole file unless asked.' },
+  { id: 'debugger', name: 'Debugging partner', style: 'precise',
+    system: 'Help find the root cause of bugs. If the exact error message, the relevant code or the expected behaviour is missing, ask for it. Reason step by step about likely causes, rank them by probability, and give the quickest check for each.' },
+  { id: 'editor', name: 'Writing editor', style: 'balanced',
+    system: "Edit the user's text for clarity, grammar and flow while keeping their voice and meaning. Return the improved text first, then a short list of the most important changes." },
+  { id: 'simple', name: 'Explain it simply', style: 'balanced',
+    system: 'Explain things so a curious 10-year-old could follow: short sentences, everyday words, and one concrete example or comparison. Offer to go deeper at the end.' },
+  { id: 'translator', name: 'Translator', style: 'precise',
+    system: "Translate the user's text, keeping meaning, tone and formatting. If no target language is given, translate into English, or from English into the language the user writes in. Output only the translation unless asked for notes." },
+  { id: 'analyst', name: 'Data analyst', style: 'precise',
+    system: 'You are a careful data analyst. Describe the structure of any data you are given, work out what is asked step by step, show formulas or code (Python with pandas, or SQL), and state your assumptions and caveats.' },
+  { id: 'brainstorm', name: 'Brainstorm partner', style: 'creative',
+    system: "Generate many varied, original ideas quickly. Group them, mark the three most promising, and build on the user's ideas rather than dismissing them." },
+  { id: 'concise', name: 'Ultra concise', style: 'precise',
+    system: 'Answer in as few words as possible. No preamble, no summaries, no filler.' },
+];
+const STYLES = {
+  precise: { label: 'Precise', help: 'Sticks to the most likely answer. Best for code, facts, maths.', temperature: 0.2 },
+  balanced: { label: 'Balanced', help: "Uses the model authors' recommended settings.", temperature: null },
+  creative: { label: 'Creative', help: 'More surprising word choices. Best for ideas and stories.', temperature: 1.0 },
+};
+const styleOf = (cs) => (cs.temperature === null || cs.temperature === undefined ? 'balanced'
+  : cs.temperature <= 0.4 ? 'precise' : cs.temperature >= 0.9 ? 'creative' : 'custom');
+const allPresets = () => [...PRESETS, ...(S.prefs.customPresets || []).map((p) => ({ ...p, custom: true }))];
 
 const S = {
   mode: null,            // 'ephemeral' | 'vault'
@@ -93,6 +130,9 @@ const S = {
   info: {},              // model -> /api/show
   ps: [],
   gpu: [],
+  shared: null,          // Windows: { dedicated_mb, shared_mb } of the main GPU
+  sharedBaseline: null,  // shared_mb seen while no model was loaded
+  loadedCtx: {},         // model -> num_ctx we last loaded it with
   connected: null,
   version: '',
   gen: null,             // { reqId, chatId, msgId }
@@ -114,10 +154,26 @@ function newChat(select = true) {
     ephemeral: false,
     messages: [],
   };
+  applyModelProfile(chat);
   S.chats.unshift(chat);
   if (select) S.activeId = chat.id;
   if (chat.model) ensureInfo(chat.model);
   return chat;
+}
+
+function applyModelProfile(chat) {
+  const prof = chat.model && S.prefs.modelProfiles && S.prefs.modelProfiles[chat.model];
+  if (!prof) return false;
+  for (const k of MODEL_KEYS) if (k in prof) chat.settings[k] = prof[k];
+  return true;
+}
+
+function applyPreset(chat, id) {
+  const p = allPresets().find((x) => x.id === id);
+  chat.settings.presetId = id;
+  if (!p) return;
+  chat.settings.system = p.system;
+  if (p.style && STYLES[p.style]) chat.settings.temperature = STYLES[p.style].temperature;
 }
 
 // ---------------------------------------------------------------- persistence
@@ -191,6 +247,16 @@ async function refreshPs() {
 async function refreshGpu() {
   try { S.gpu = await Backend.gpuInfo(); } catch (_) { S.gpu = []; }
 }
+async function refreshShared() {
+  try { S.shared = await Backend.gpuShared(); } catch (_) { S.shared = null; }
+  if (S.shared && !S.ps.length && !S.gen) S.sharedBaseline = S.shared.shared_mb;
+}
+// GB of model data that has overflowed into system RAM through the Windows driver.
+function overflowGB() {
+  if (!S.shared || !S.ps.length) return 0;
+  const base = S.sharedBaseline !== null ? S.sharedBaseline : 300;
+  return Math.max(0, (S.shared.shared_mb - base) / 1024);
+}
 
 function capabilities(model) {
   const info = S.info[model];
@@ -241,8 +307,9 @@ function estimateFor(model, ctx, withCalibration = true) {
 
 function calibrate() {
   for (const p of S.ps) {
-    if (!p.context_length || !p.size) continue;
-    const raw = estimateFor(p.name, p.context_length, false);
+    const ctx = p.context_length || S.loadedCtx[p.name];
+    if (!ctx || !p.size) continue;
+    const raw = estimateFor(p.name, ctx, false);
     if (!raw || !raw.total) continue;
     const ratio = p.size / raw.total;
     if (ratio > 0.6 && ratio < 1.6) S.calib[p.name] = ratio;
@@ -254,20 +321,27 @@ function memState(model, ctx) {
   if (!est) return null;
   const budget = vramBudget();
   const loaded = loadedEntry(model);
+  let actual = null;
+  if (loaded && loaded.size) {
+    const lctx = loaded.context_length || S.loadedCtx[model] || null;
+    actual = { size: loaded.size, vram: loaded.size_vram || 0, ctx: lctx };
+    actual.gpuPct = Math.round((actual.vram / actual.size) * 100);
+    actual.sameCtx = !lctx || lctx === Number(ctx);
+  }
+  // Once the model is loaded with these settings, show what Ollama measured, not our guess.
+  const measured = !!(actual && actual.sameCtx);
+  const total = measured ? actual.size : est.total;
   let status = 'unknown';
   let gpuShare = null;
   if (budget) {
     const free = budget.total - budget.other;
-    const ratio = est.total / free;
-    status = ratio <= 0.92 ? 'ok' : ratio <= 1 ? 'tight' : 'spill';
-    gpuShare = Math.max(0, Math.min(1, free / est.total));
+    const ratio = total / free;
+    status = ratio <= Est.OK_RATIO ? 'ok' : ratio <= Est.TIGHT_RATIO ? 'tight' : 'spill';
+    gpuShare = Math.max(0, Math.min(1, free / total));
   }
-  let actual = null;
-  if (loaded && loaded.size) {
-    actual = { size: loaded.size, vram: loaded.size_vram || 0, ctx: loaded.context_length || null };
-    actual.gpuPct = Math.round((actual.vram / actual.size) * 100);
-  }
-  return { est, budget, status, gpuShare, actual };
+  const overflow = actual ? overflowGB() : 0;
+  if (actual && (actual.gpuPct < 95 || overflow > 1)) status = 'spill';
+  return { est, budget, status, gpuShare, actual, measured, total, overflow };
 }
 
 function maxCtxFor(model) {
@@ -388,8 +462,10 @@ async function send() {
 
 async function generate(chat) {
   const asst = { id: uid(), role: 'assistant', content: '', thinking: '', model: chat.model, pending: true, stats: null };
-  asst.loadingNote = loadedEntry(chat.model) ? 'Reading your message…' : 'Loading the model into memory…';
   chat.messages.push(asst);
+  const promptTok = toApiMessages(chat).reduce((n, m) => n + estTokens(m.content) + (m.images ? m.images.length * 768 : 0), 0);
+  const L = asst.live = { t0: performance.now(), wasLoaded: !!loadedEntry(chat.model), promptTok, thinkTok: 0, ansTok: 0, tThink: 0, tAns: 0 };
+  const ticker = setInterval(() => updateLiveStatus(asst), 250);
   chat.updated = Date.now();
   const body = {
     model: chat.model,
@@ -411,6 +487,12 @@ async function generate(chat) {
     await Backend.stream('/api/chat', body, reqId, (ev) => {
       if (ev.hush_cancelled) { asst.stopped = true; gotDone = true; return; }
       if (ev.message) {
+        const now = performance.now();
+        if (ev.message.thinking) { if (!L.thinkTok) L.tThink = now; L.thinkTok++; }
+        if (ev.message.content) {
+          if (!L.ansTok) { L.tAns = now; if (L.thinkTok) asst.thinkSecs = (now - L.tThink) / 1000; }
+          L.ansTok++;
+        }
         asst.content += ev.message.content || '';
         asst.thinking += ev.message.thinking || '';
       }
@@ -428,18 +510,46 @@ async function generate(chat) {
   } catch (e) {
     asst.error = errText(e);
   } finally {
+    clearInterval(ticker);
     asst.pending = false;
-    delete asst.loadingNote;
+    if (L.thinkTok && !L.ansTok) asst.thinkSecs = (performance.now() - L.tThink) / 1000;
+    delete asst.live;
+    S.loadedCtx[chat.model] = Number(chat.settings.num_ctx);
     S.gen = null;
     chat.updated = Date.now();
     if (chat.id === S.activeId) renderMessages(false);
     renderComposerState();
     renderCtxBar();
     persist();
-    await refreshPs();
+    await Promise.all([refreshPs(), refreshGpu(), refreshShared()]);
     renderTopbar();
+    renderHardware();
     if (!$('#tune').hidden) renderMemCard();
   }
+}
+
+function liveStatus(m) {
+  const L = m.live;
+  if (!L) return '';
+  const now = performance.now();
+  const secs = ((now - L.t0) / 1000).toFixed(1);
+  const rate = (n, t) => (n > 3 && now - t > 600 ? n / ((now - t) / 1000) : null);
+  let text;
+  let r = null;
+  if (L.ansTok) { r = rate(L.ansTok, L.tAns); text = `Answering · ${fmtInt(L.ansTok)} tokens`; }
+  else if (L.thinkTok) { r = rate(L.thinkTok, L.tThink); text = `Thinking · ${fmtInt(L.thinkTok)} tokens`; }
+  else text = L.wasLoaded ? `Reading your prompt (≈ ${fmtInt(L.promptTok)} tokens)` : 'Loading the model into the graphics card, then reading your prompt';
+  if (r !== null) text += ` · ${r.toFixed(1)} tok/s`;
+  text += ` · ${secs}s`;
+  let hint = '';
+  if (r !== null && r < 6 && now - (L.tAns || L.tThink) > 3000) hint = ' <span class="warn">Slow: part of the model is probably outside the graphics card. Open Tune to see why.</span>';
+  else if (!L.ansTok && !L.thinkTok && now - L.t0 > 20000) hint = ' <span class="warn">Taking long: big prompts and first loads can take a while, especially if the model doesn\'t fit.</span>';
+  return `<span class="live-dot"></span>${esc(text)}${hint}`;
+}
+
+function updateLiveStatus(m) {
+  const el = $(`[data-live="${m.id}"]`);
+  if (el) el.innerHTML = liveStatus(m);
 }
 
 function stop() {
@@ -525,34 +635,41 @@ function renderTopbar() {
 }
 
 function gaugeBar(ms) {
-  const { est, budget } = ms;
-  const cap = budget ? Math.max(budget.total, budget.other + est.total) : est.total;
+  const { est, budget, total } = ms;
+  const k = est.total ? total / est.total : 1; // scale the estimated split to the measured total
+  const cap = budget ? Math.max(budget.total, budget.other + total) : total;
   const pct = (b) => `${Math.max(0, (b / cap) * 100).toFixed(2)}%`;
   let html = '';
-  if (budget && budget.other) html += `<span class="seg-other" style="width:${pct(budget.other)}" title="Used by other apps"></span>`;
-  html += `<span class="seg-w" style="width:${pct(est.weights)}"></span><span class="seg-kv" style="width:${pct(est.kv)}"></span><span class="seg-o" style="width:${pct(est.overhead)}"></span>`;
-  if (budget && budget.other + est.total > budget.total) {
-    html = `<span style="position:absolute;left:${pct(budget.total)};top:0;bottom:0;width:2px;background:var(--text)"></span>` + html;
+  if (budget && budget.other) html += `<span class="seg-other" style="width:${pct(budget.other)}" title="Windows and other apps"></span>`;
+  html += `<span class="seg-w" style="width:${pct(est.weights * k)}" title="Model"></span><span class="seg-kv" style="width:${pct(est.kv * k)}" title="Conversation memory"></span><span class="seg-o" style="width:${pct(est.overhead * k)}" title="Working space"></span>`;
+  if (budget && budget.other + total > budget.total) {
+    html = `<span class="gauge-limit" style="left:${pct(budget.total)}"></span>` + html;
   }
   return `<span class="gauge-bar">${html}</span>`;
 }
 
-const STATUS_TEXT = { ok: 'fits on GPU', tight: 'tight fit', spill: 'spills to CPU', unknown: '' };
+const STATUS_TEXT = { ok: 'Fits', tight: 'Tight', spill: 'Too big', unknown: '' };
+const STATUS_LONG = {
+  ok: '✓ Fits in your graphics card',
+  tight: '⚠ Only just fits',
+  spill: '✗ Too big: part of it runs from normal RAM (much slower)',
+  unknown: 'Graphics card size unknown',
+};
 
 function renderGauge() {
   const g = $('#mem-gauge');
   const chat = activeChat();
   const ms = chat && chat.model ? memState(chat.model, chat.settings.num_ctx) : null;
   if (!ms) { g.innerHTML = ''; return; }
-  const total = ms.budget ? Est.fmtGB(ms.budget.total) : '?';
   let text;
   if (ms.budget) {
-    text = `≈ ${Est.fmtGB(ms.est.total + ms.budget.other).replace(' GB', '')} / ${total} · <span class="status ${ms.status}">${STATUS_TEXT[ms.status]}</span>`;
+    const used = ms.total + ms.budget.other;
+    text = `<span class="g-num">${ms.measured ? '' : '≈ '}${(used / GiB).toFixed(1)} / ${(ms.budget.total / GiB).toFixed(1)} GB</span><span class="status ${ms.status}">${STATUS_TEXT[ms.status]}</span>`;
   } else {
-    text = `≈ ${Est.fmtGB(ms.est.total)} needed · <span class="status tight">set GPU size in Tune</span>`;
+    text = `<span class="g-num">≈ ${Est.fmtGB(ms.total)}</span><span class="status tight">GPU size?</span>`;
   }
-  if (ms.actual && ms.actual.gpuPct < 95) text += ` · <span class="status spill">now ${ms.actual.gpuPct}% GPU</span>`;
-  g.innerHTML = gaugeBar(ms) + `<span>${text}</span>`;
+  g.title = `${STATUS_LONG[ms.status]}. ${ms.measured ? 'Measured by Ollama.' : 'Estimate: the real number appears after the first reply.'} Click to tune.`;
+  g.innerHTML = gaugeBar(ms) + text;
 }
 
 function renderCtxBar() {
@@ -568,7 +685,8 @@ function renderCtxBar() {
   bar.innerHTML = `<span>${label}</span><span class="ctx-track"><span class="ctx-fill" style="width:${pct}%"></span></span>`;
 }
 
-function fmtStats(st) {
+function fmtStats(m) {
+  const st = m.stats;
   if (!st) return '';
   const parts = [];
   if (st.eval_count && st.eval_duration) parts.push(`${(st.eval_count / (st.eval_duration / 1e9)).toFixed(1)} tok/s`);
@@ -576,6 +694,8 @@ function fmtStats(st) {
   const first = (st.load_duration || 0) + (st.prompt_eval_duration || 0);
   if (first) parts.push(`first token ${(first / 1e9).toFixed(1)}s`);
   if (st.load_duration > 1e9) parts.push(`model load ${(st.load_duration / 1e9).toFixed(1)}s`);
+  if (m.thinkSecs) parts.push(`thought ${m.thinkSecs.toFixed(1)}s`);
+  if (st.total_duration) parts.push(`total ${(st.total_duration / 1e9).toFixed(1)}s`);
   let html = parts.map(esc).join(' · ');
   if (st.done_reason === 'length') html += ' · <span class="warn">hit the max response length</span>';
   return html;
@@ -593,7 +713,7 @@ function assistantBody(m) {
     html += `<details class="think"${open ? ' open' : ''} data-msg="${m.id}"><summary>${live ? 'Thinking…' : 'Thought process'} · ${fmtInt(words)} words</summary><div class="think-body">${esc(thinking)}</div></details>`;
   }
   if (body) html += MD.render(body);
-  else if (m.pending && !thinking) html += `<div class="waiting">${esc(m.loadingNote || 'Waiting for the model…')}</div>`;
+  else if (m.pending && !thinking) html += '<div class="waiting"></div>';
   if (m.stopped && !m.pending) html += '<div class="msg-meta"><span class="warn">Stopped</span></div>';
   if (m.error) html += `<div class="err">${esc(m.error)}</div>`;
   return html;
@@ -612,7 +732,7 @@ function messageHtml(m, isLast) {
   return `<div class="msg ${m.role}" data-id="${m.id}"><div class="avatar">${user ? 'you' : 'ai'}</div><div>` +
     `<div class="who">${who}</div>${files ? `<div class="msg-files">${files}</div>` : ''}` +
     `<div class="bubble${!user && m.pending && splitThink(m.content).body ? ' cursor' : ''}">${body}</div>` +
-    `<div class="msg-meta">${user ? '' : fmtStats(m.stats)}${m.pending ? '' : `<span class="msg-actions">${actions}</span>`}</div></div></div>`;
+    `<div class="msg-meta">${m.pending ? `<span class="live-status" data-live="${m.id}">${liveStatus(m)}</span>` : `${user ? '' : fmtStats(m)}<span class="msg-actions">${actions}</span>`}</div></div></div>`;
 }
 
 function emptyState() {
@@ -624,6 +744,15 @@ function emptyState() {
     `<div class="tip"><b>Watch the memory gauge</b>Top right. Green means the model and its context fit on your GPU${fit ? `, up to about ${fmtCtx(fit)} tokens for this model` : ''}.</div>` +
     '<div class="tip"><b>Tune per chat</b>Context size, creativity, thinking and a system prompt. Every setting says what it does.</div>' +
     '<div class="tip"><b>Wipe in one click</b>Ctrl+Shift+L clears the session, unloads the model from GPU memory and empties the clipboard.</div>' +
+    '</div>' + roleChips() + '</div>';
+}
+
+function roleChips() {
+  const chat = activeChat();
+  const cur = chat ? chat.settings.presetId : '';
+  const list = allPresets();
+  return `<div class="role-pick"><div class="role-title">Pick a role for this chat <span>(change any time in Tune)</span></div><div class="role-chips">` +
+    list.map((p) => `<button type="button" class="role-chip${p.id === cur ? ' on' : ''}" data-role="${esc(p.id)}" title="${esc(p.system)}">${esc(p.name)}</button>`).join('') +
     '</div></div>';
 }
 
@@ -684,35 +813,91 @@ function ctxSteps(model) {
   return steps;
 }
 
+function segCtl(name, options, current) {
+  return `<div class="seg-ctl">${options.map(([v, l]) => `<button type="button" data-${name}="${v}" class="${v === current ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+}
+
+function sysCountHtml(cs) {
+  const tok = estTokens(cs.system);
+  const ctx = Number(cs.num_ctx);
+  const pct = Math.round((tok / ctx) * 100);
+  const cls = tok > ctx * 0.9 ? 'bad' : tok > ctx * 0.5 ? 'warn' : '';
+  return tok ? `<span class="${cls}">≈ ${fmtInt(tok)} tokens · ${pct}% of this chat's memory</span>` : 'No role text: the model behaves as its default self.';
+}
+
 function renderTune() {
   const chat = activeChat();
   const body = $('#tune-body');
   if (!chat) { body.innerHTML = '<p class="help">Start a chat to tune it.</p>'; return; }
+  const adv = S.prefs.tuneMode === 'advanced';
   const cs = chat.settings;
   const model = chat.model;
   const steps = ctxSteps(model);
-  let idx = steps.findIndex((s) => s >= cs.num_ctx);
+  let idx = steps.findIndex((x) => x >= cs.num_ctx);
   if (idx < 0) idx = steps.length - 1;
   const maxCtx = maxCtxFor(model);
   const defs = modelDefaults(model);
   const caps = capabilities(model);
   const fit = fitCtxFor(model);
+  const profile = S.prefs.modelProfiles && S.prefs.modelProfiles[model];
 
-  let html = `<div id="mem-card" class="mem-card"></div>
-    <div class="field"><label>Context window <span class="val" id="ctx-val">${fmtInt(cs.num_ctx)} tokens</span></label>
-      <input type="range" id="ctx-range" min="0" max="${steps.length - 1}" step="1" value="${idx}">
-      <div class="row" style="justify-content:space-between"><span class="def" id="ctx-pages">≈ ${Est.pages(cs.num_ctx)} pages of text · model max ${fmtCtx(maxCtx)}</span>
-      ${fit ? `<button class="btn small" id="ctx-fit" type="button" title="Largest context that keeps everything on the GPU">Fit to GPU (${fmtCtx(fit)})</button>` : ''}</div>
-      <p class="help">How much of the conversation (and attached files) the model can see at once. Anything beyond this is silently cut from the start. Bigger needs more GPU memory: watch the gauge.</p></div>`;
+  let html = segCtl('mode', [['simple', 'Simple'], ['advanced', 'Advanced']], S.prefs.tuneMode);
+  html += '<div id="mem-card" class="mem-card"></div>';
 
+  // ---- memory / context
+  html += `<div class="field"><label>${adv ? 'Context window' : 'How much it remembers'} <span class="val" id="ctx-val">${adv ? `${fmtInt(cs.num_ctx)} tokens` : `≈ ${Est.pages(cs.num_ctx)} pages`}</span></label>
+    <input type="range" id="ctx-range" min="0" max="${steps.length - 1}" step="1" value="${idx}">
+    <div class="row" style="justify-content:space-between"><span class="def" id="ctx-pages">${adv ? `≈ ${Est.pages(cs.num_ctx)} pages` : `${fmtInt(cs.num_ctx)} tokens`} · model max ${fmtCtx(maxCtx)}</span>
+    ${fit ? `<button class="btn small" id="ctx-fit" type="button" title="Largest setting that keeps everything inside the graphics card">${adv ? 'Fit to GPU' : 'Biggest that fits'} (${fmtCtx(fit)})</button>` : ''}</div>
+    <p class="help">${adv
+      ? 'Tokens the model can see at once: role text, conversation, files and its own thinking. Anything beyond is silently cut from the start. Costs GPU memory (the blue part of the bar).'
+      : "Everything the model can keep in mind at once: the role text, your messages, its answers and any files. When it's full, the oldest part is forgotten. More memory needs more room in the graphics card."}</p></div>`;
+
+  // ---- role
+  const presets = allPresets();
+  const current = presets.find((p) => p.id === cs.presetId);
+  const edited = current && current.system !== cs.system;
+  const sel = !cs.presetId || edited ? '' : cs.presetId;
+  html += `<div class="field"><label>Role</label>
+    <select id="preset"><option value=""${sel === '' ? ' selected' : ''}>${cs.system ? (edited ? `${esc(current.name)} (edited)` : 'Custom') : 'None'}</option>
+    <optgroup label="Built-in">${PRESETS.map((p) => `<option value="${p.id}"${sel === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</optgroup>
+    ${(S.prefs.customPresets || []).length ? `<optgroup label="My roles">${S.prefs.customPresets.map((p) => `<option value="${p.id}"${sel === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</optgroup>` : ''}
+    </select>
+    <textarea id="system" placeholder="Standing instructions for this chat, e.g. You are a senior Rust engineer. Answer concisely.">${esc(cs.system || '')}</textarea>
+    <div class="row" style="justify-content:space-between"><span class="def" id="sys-count">${sysCountHtml(cs)}</span>
+    <span class="row" style="margin:0;gap:6px">${current && current.custom ? '<button class="btn small ghost" id="role-del" type="button">Delete</button>' : ''}<button class="btn small" id="role-save" type="button">Save as my role</button></span></div>
+    <p class="help">Instructions the model follows for the whole chat. ${adv ? 'Sent as the system message; it uses context like any other text.' : 'Long roles use up memory, so keep them as short as you can.'}</p></div>`;
+
+  // ---- style
+  const st = styleOf(cs);
+  html += `<div class="field"><div class="lbl">Style${st === 'custom' ? ' <span class="val">custom</span>' : ''}</div>
+    ${segCtl('style', Object.entries(STYLES).map(([k, v]) => [k, v.label]), st)}
+    <p class="help">${st === 'custom' ? 'You set your own temperature in Advanced.' : STYLES[st].help}</p></div>`;
+
+  // ---- thinking
   if (caps.includes('thinking')) {
-    const opts = [['default', 'Model default'], ['on', 'On'], ['off', 'Off'], ['low', 'Low effort'], ['medium', 'Medium effort'], ['high', 'High effort']];
-    html += `<div class="field"><label>Thinking</label><select id="think">${opts.map(([v, l]) => `<option value="${v}"${cs.think === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
-      <p class="help">Lets the model reason before answering (shown folded above the answer). Better for hard problems, slower and uses more context. Effort levels only work on models that support them (like gpt-oss).</p></div>`;
+    if (adv) {
+      const opts = [['default', 'Model default'], ['on', 'On'], ['off', 'Off'], ['low', 'Low effort'], ['medium', 'Medium effort'], ['high', 'High effort']];
+      html += `<div class="field"><label>Thinking</label><select id="think">${opts.map(([v, l]) => `<option value="${v}"${cs.think === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
+        <p class="help">Reasoning written before the answer (shown folded). It shares the context window, so it needs room. Effort levels only work on models that support them (such as gpt-oss).</p></div>`;
+    } else {
+      const cur = ['on', 'low', 'medium', 'high'].includes(cs.think) ? 'on' : cs.think === 'off' ? 'off' : 'default';
+      html += `<div class="field"><div class="lbl">Think before answering</div>${segCtl('think', [['off', 'Off'], ['default', 'Auto'], ['on', 'On']], cur)}
+        <p class="help">Thinking helps with hard problems but can take a long time. Turn it off for quick questions like "hi" or simple lookups.</p></div>`;
+    }
   }
 
-  html += `<div class="field"><label>System prompt</label><textarea id="system" placeholder="e.g. You are a senior Rust engineer. Answer concisely.">${esc(cs.system || '')}</textarea>
-    <p class="help">Standing instructions for this chat. Uses context like any message.</p></div>`;
+  // ---- per-model memory
+  html += `<div class="field profile"><div class="lbl">Settings for ${esc(model || 'this model')}</div>
+    <p class="help">${profile ? `✓ New chats with ${esc(model)} start with your saved memory, style and thinking settings.` : `Save this memory, style and thinking setup so every new chat with ${esc(model || 'this model')} starts with it.`}</p>
+    <div class="row"><button class="btn small" id="profile-save" type="button">${profile ? 'Update saved settings' : 'Remember for this model'}</button>${profile ? '<button class="btn small ghost" id="profile-forget" type="button">Forget</button>' : ''}</div></div>`;
+
+  if (!adv) {
+    html += '<button class="linkish" data-mode="advanced" type="button">More controls → Advanced</button>';
+    body.innerHTML = html;
+    renderMemCard();
+    return;
+  }
 
   html += '<div class="t-sec">Sampling</div>';
   for (const f of FIELDS) {
@@ -733,22 +918,21 @@ function renderTune() {
     html += `<div class="field"><label><span>Keep this chat out of the vault</span><input type="checkbox" id="chat-eph"${chat.ephemeral ? ' checked' : ''}></label>
       <p class="help">The chat stays in memory only and disappears when you lock or close Hush.</p></div>`;
   }
-  html += '<div class="row" style="display:flex;gap:8px"><button class="btn small" id="save-defaults" type="button">Use these for new chats</button><button class="btn small ghost" id="reset-chat" type="button">Reset to defaults</button></div>';
+  html += '<div class="row" style="display:flex;gap:8px"><button class="btn small" id="save-defaults" type="button">Use these for all new chats</button><button class="btn small ghost" id="reset-chat" type="button">Reset this chat</button></div>';
 
-  // ---- global
   const kvOpts = [['f16', 'f16 (Ollama default)'], ['q8_0', 'q8_0 (half the memory, near-identical quality)'], ['q4_0', 'q4_0 (quarter memory, some quality loss)']];
   const kaOpts = [['0', 'Unload right after each answer'], ['5m', '5 minutes'], ['10m', '10 minutes'], ['30m', '30 minutes'], ['-1', 'Until I wipe or quit Ollama']];
   const gpu = S.gpu[0];
   html += `<div class="t-sec">This PC (all chats)</div>
     <div class="field"><label>Keep model in GPU memory</label><select id="keep-alive">${kaOpts.map(([v, l]) => `<option value="${v}"${S.prefs.keepAlive === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
-      <p class="help">Loading a model takes seconds; keeping it loaded makes replies start instantly but holds the GPU memory. Unloading also clears your conversation from GPU memory.</p></div>
+      <p class="help">Loading takes seconds; keeping it loaded makes replies start instantly but holds the memory. Unloading also clears your conversation from GPU memory.</p></div>
     <div class="field"><label>Ollama KV cache type</label><select id="kv-type">${kvOpts.map(([v, l]) => `<option value="${v}"${S.prefs.kvType === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
       <div class="row"><label class="auto-toggle"><input type="checkbox" id="flash"${S.prefs.flashAttention ? ' checked' : ''}> Flash attention is on</label></div>
-      <p class="help">These are Ollama server settings, so Hush can't change them. Tell Hush what you've set so the memory estimate is right. To enable them on Windows, run this once in a terminal, then quit Ollama from the tray and start it again:</p>
+      <p class="help">Ollama server settings: Hush can't change them, so tell it what you use to keep estimates right. To enable on Windows, run once in a terminal, then quit Ollama from the tray and start it again:</p>
       <code class="code-inline">setx OLLAMA_FLASH_ATTENTION 1\nsetx OLLAMA_KV_CACHE_TYPE q8_0</code></div>
     <div class="field"><label>GPU memory <span class="val">${gpu ? esc(gpu.name) : 'not detected'}</span></label>
       <div class="row"><input type="number" id="vram" min="0" step="0.5" value="${S.prefs.vramOverrideGB || ''}" placeholder="${gpu ? `auto: ${(gpu.total_mb / 1024).toFixed(1)} GB` : 'e.g. 12'}"><span class="def">GB</span></div>
-      <p class="help">Detected automatically on NVIDIA cards. Enter a number to override (for AMD or Intel GPUs).</p></div>
+      <p class="help">Detected automatically on NVIDIA cards. Enter a number to override (AMD or Intel GPUs).</p></div>
     <div class="field"><label>Ollama address</label><div class="row"><input type="text" id="ollama-url" value="${esc(S.prefs.ollamaUrl)}"><button class="btn small" id="url-save" type="button">Apply</button></div>
       <p class="help">Only addresses on this computer are accepted.</p></div>`;
   if (S.mode === 'vault') {
@@ -758,6 +942,18 @@ function renderTune() {
   renderMemCard();
 }
 
+function contextWarnings(chat) {
+  const cs = chat.settings;
+  const ctx = Number(cs.num_ctx);
+  const out = [];
+  const sysTok = estTokens(cs.system);
+  if (sysTok > ctx * 0.9) out.push(['bad', `Your system prompt alone is ≈ ${fmtInt(sysTok)} tokens, but the model can only hold ${fmtInt(ctx)}. It won't see all of it. Raise "How much it remembers" or shorten the prompt.`]);
+  else if (sysTok > ctx * 0.5) out.push(['warn', `Your system prompt uses about ${Math.round((sysTok / ctx) * 100)}% of the memory before you've typed anything.`]);
+  const thinks = capabilities(chat.model).includes('thinking') && cs.think !== 'off';
+  if (thinks && ctx < 8192) out.push(['warn', 'Thinking models write their reasoning into the same memory. Below 8k it fills up mid-thought, which makes them slow and confused. Use 8k+ or turn thinking off.']);
+  return out;
+}
+
 function renderMemCard() {
   const card = $('#mem-card');
   const chat = activeChat();
@@ -765,26 +961,45 @@ function renderMemCard() {
   if (!chat.model) { card.innerHTML = '<span class="help">Pick a model to see its memory use.</span>'; return; }
   const ms = memState(chat.model, chat.settings.num_ctx);
   if (!ms) { card.innerHTML = '<span class="help">Waiting for model details…</span>'; return; }
-  const { est, budget, status, actual } = ms;
-  let html = `<div style="display:flex;justify-content:space-between"><b>GPU memory</b><span class="status ${status}">${STATUS_TEXT[status] || ''}</span></div>`;
+  const { est, budget, status, actual, measured, total, overflow } = ms;
+  const k = est.total ? total / est.total : 1;
+  const adv = S.prefs.tuneMode === 'advanced';
+  let html = `<div class="mem-status ${status}">${STATUS_LONG[status]}</div>`;
   html += gaugeBar(ms);
   html += '<div class="legend">';
-  if (budget && budget.other) html += `<span><i style="background:var(--other)"></i>Other apps &amp; Windows</span><b>${Est.fmtGB(budget.other)}</b>`;
-  html += `<span><i style="background:var(--weights)"></i>Model weights</span><b>${Est.fmtGB(est.weights)}</b>`;
-  html += `<span><i style="background:var(--kv)"></i>Context memory (KV cache)</span><b>${Est.fmtGB(est.kv)}</b>`;
-  html += `<span><i style="background:var(--over)"></i>Working buffers</span><b>${Est.fmtGB(est.overhead)}</b>`;
-  html += `<span>Total${est.approximate ? ' (upper estimate)' : ' (estimate)'}</span><b>${Est.fmtGB(est.total + (budget ? budget.other : 0))}${budget ? ` / ${Est.fmtGB(budget.total)}` : ''}</b>`;
+  if (budget && budget.other) html += `<span><i style="background:var(--other)"></i>Windows &amp; other apps</span><b>${Est.fmtGB(budget.other)}</b>`;
+  html += `<span><i style="background:var(--weights)"></i>The model itself</span><b>${Est.fmtGB(est.weights * k)}</b>`;
+  html += `<span><i style="background:var(--kv)"></i>Conversation memory</span><b>${Est.fmtGB(est.kv * k)}</b>`;
+  html += `<span><i style="background:var(--over)"></i>Working space</span><b>${Est.fmtGB(est.overhead * k)}</b>`;
+  html += `<span><b class="lbl">Total</b></span><b>${Est.fmtGB(total + (budget ? budget.other : 0))}${budget ? ` / ${Est.fmtGB(budget.total)}` : ''}</b>`;
   html += '</div>';
-  html += `<div class="def">Each 1k tokens of context costs ≈ ${(est.perToken * 1024 / 1048576).toFixed(0)} MB with ${esc(S.prefs.kvType)} cache.</div>`;
-  if (actual) {
-    const same = !actual.ctx || actual.ctx === Number(chat.settings.num_ctx);
-    const slow = actual.gpuPct < 95;
-    html += `<div class="note${slow ? ' bad' : ''}">Loaded right now: ${Est.fmtGB(actual.size)}, <b>${actual.gpuPct}% on GPU</b>${actual.gpuPct < 100 ? ` and ${100 - actual.gpuPct}% on CPU.${slow ? ' Expect much slower answers.' : ' A small spill like this costs a little speed.'}` : '.'}${same ? '' : ` (loaded with ${fmtCtx(actual.ctx)} context; it reloads with your setting on the next message)`}</div>`;
+  html += `<div class="def">${measured ? '● Measured by Ollama for these settings.' : `○ Estimate${est.approximate ? ' (rough for this model type)' : ''}. Hush switches to the real number after the first reply.`}</div>`;
+  if (adv) html += `<div class="def">Each 1k tokens of context ≈ ${(est.perToken * 1024 / 1048576).toFixed(0)} MB (${esc(S.prefs.kvType)} cache).</div>`;
+  if (actual && actual.gpuPct < 100) {
+    html += `<div class="note${actual.gpuPct < 95 ? ' bad' : ''}">Ollama put ${100 - actual.gpuPct}% of the model on the CPU. ${actual.gpuPct < 95 ? 'Expect much slower answers.' : 'A small spill like this costs a little speed.'}</div>`;
   }
-  if (status === 'spill') html += '<div class="note bad">This won\'t fit on your GPU. Ollama will quietly run part of the model on the CPU, often 3–10× slower. Lower the context, switch the cache to q8_0, or pick a smaller model.</div>';
-  else if (status === 'tight') html += '<div class="note warn">Very close to the limit. Another app using the GPU (a game, a browser with video) could push it over.</div>';
-  if (!budget) html += '<div class="note warn">GPU memory unknown. Enter it below under "This PC".</div>';
+  if (actual && !actual.sameCtx) html += `<div class="note">Loaded right now with ${fmtCtx(actual.ctx)} memory. It reloads with your setting on the next message.</div>`;
+  if (overflow > 1) {
+    html += `<div class="note bad"><b>Windows moved ≈ ${overflow.toFixed(1)} GB into normal RAM</b> ("shared GPU memory"). Ollama can't see this, and it's why replies crawl. Lower "How much it remembers", pick a smaller model, or close other apps using the graphics card.` +
+      (adv ? '<br><br>To get a clear error instead of a silent slowdown: NVIDIA Control Panel → Manage 3D settings → CUDA – Sysmem Fallback Policy → <i>Prefer No Sysmem Fallback</i>.' : '') + '</div>';
+  } else if (status === 'spill' && !actual) {
+    html += '<div class="note bad">This won\'t fit. Lower "How much it remembers", or pick a smaller model.' + (adv ? ' Switching the cache to q8_0 also helps (see This PC).' : '') + '</div>';
+  } else if (status === 'tight') {
+    html += '<div class="note warn">Very close to the limit. A game, a browser playing video or another app on the graphics card could push it over and slow everything down.</div>';
+  }
+  if (!budget) html += '<div class="note warn">Graphics card size unknown. Enter it under Advanced → This PC.</div>';
+  for (const [kind, text] of contextWarnings(chat)) html += `<div class="note ${kind}">${esc(text)}</div>`;
+  const g = S.gpu[0];
+  if (g) {
+    html += `<div class="live-hw">Graphics card now: <b>${(g.used_mb / 1024).toFixed(1)} / ${(g.total_mb / 1024).toFixed(1)} GB</b>` +
+      `${g.util_pct !== null && g.util_pct !== undefined ? ` · ${g.util_pct}% busy` : ''}${g.temp_c ? ` · ${g.temp_c}°C` : ''}` +
+      `${S.shared ? ` · shared RAM ${(S.shared.shared_mb / 1024).toFixed(1)} GB` : ''}</div>`;
+  }
   card.innerHTML = html;
+}
+
+function afterSettingsChange() {
+  renderMemCard(); renderGauge(); renderCtxBar(); persist();
 }
 
 function onTuneInput(e) {
@@ -795,10 +1010,26 @@ function onTuneInput(e) {
   if (t.id === 'ctx-range') {
     const steps = ctxSteps(chat.model);
     cs.num_ctx = steps[Number(t.value)];
-    $('#ctx-val').textContent = `${fmtInt(cs.num_ctx)} tokens`;
-    $('#ctx-pages').textContent = `≈ ${Est.pages(cs.num_ctx)} pages of text · model max ${fmtCtx(maxCtxFor(chat.model))}`;
-    renderMemCard(); renderGauge(); renderCtxBar();
-  } else if (t.dataset.k) {
+    const adv = S.prefs.tuneMode === 'advanced';
+    $('#ctx-val').textContent = adv ? `${fmtInt(cs.num_ctx)} tokens` : `≈ ${Est.pages(cs.num_ctx)} pages`;
+    $('#ctx-pages').textContent = `${adv ? `≈ ${Est.pages(cs.num_ctx)} pages` : `${fmtInt(cs.num_ctx)} tokens`} · model max ${fmtCtx(maxCtxFor(chat.model))}`;
+    $('#sys-count').innerHTML = sysCountHtml(cs);
+    afterSettingsChange();
+    return;
+  }
+  if (t.id === 'preset') {
+    if (t.value) applyPreset(chat, t.value);
+    else cs.presetId = '';
+    renderTune(); afterSettingsChange();
+    return;
+  }
+  if (t.id === 'system') {
+    cs.system = t.value;
+    $('#sys-count').innerHTML = sysCountHtml(cs);
+    afterSettingsChange();
+    return;
+  }
+  if (t.dataset.k) {
     const f = FIELDS.find((x) => x.key === t.dataset.k);
     cs[f.key] = t.value === '' ? null : Number(t.value);
     const v = t.closest('.field').querySelector('.val');
@@ -809,31 +1040,69 @@ function onTuneInput(e) {
     if (t.checked) cs[key] = null;
     else { const md = modelDefaults(chat.model)[key]; cs[key] = md !== undefined ? md : f.fallback; }
     renderTune();
-  } else if (t.id === 'system') cs.system = t.value;
-  else if (t.id === 'think') cs.think = t.value;
+  } else if (t.id === 'think') { cs.think = t.value; renderMemCard(); }
   else if (t.id === 'chat-eph') { chat.ephemeral = t.checked; renderSidebar(); }
   else if (t.id === 'keep-alive') S.prefs.keepAlive = t.value;
-  else if (t.id === 'kv-type') { S.prefs.kvType = t.value; S.calib = {}; renderTune(); renderGauge(); }
-  else if (t.id === 'flash') { S.prefs.flashAttention = t.checked; S.calib = {}; renderMemCard(); renderGauge(); }
-  else if (t.id === 'vram') { S.prefs.vramOverrideGB = parseFloat(t.value) || 0; renderMemCard(); renderGauge(); }
+  else if (t.id === 'kv-type') { S.prefs.kvType = t.value; S.calib = {}; renderTune(); }
+  else if (t.id === 'flash') { S.prefs.flashAttention = t.checked; S.calib = {}; }
+  else if (t.id === 'vram') S.prefs.vramOverrideGB = parseFloat(t.value) || 0;
   else if (t.id === 'autolock') S.prefs.autoLockMin = Number(t.value);
-  persist();
+  afterSettingsChange();
 }
 
 async function onTuneClick(e) {
   const chat = activeChat();
-  const id = e.target.id;
-  if (id === 'ctx-fit' && chat) {
+  const b = e.target.closest('button');
+  if (!b || !chat) return;
+  const cs = chat.settings;
+  const id = b.id;
+  if (b.dataset.mode) { S.prefs.tuneMode = b.dataset.mode; renderTune(); persist(); return; }
+  if (b.dataset.style) {
+    cs.temperature = STYLES[b.dataset.style].temperature;
+    if (b.dataset.style === 'balanced') { cs.top_p = null; cs.top_k = null; cs.min_p = null; }
+    renderTune(); afterSettingsChange(); return;
+  }
+  if (b.dataset.think) { cs.think = b.dataset.think; renderTune(); afterSettingsChange(); return; }
+  if (id === 'ctx-fit') {
     const fit = fitCtxFor(chat.model);
-    if (fit) { chat.settings.num_ctx = fit; renderTune(); renderGauge(); renderCtxBar(); persist(); }
-  } else if (id === 'save-defaults' && chat) {
-    S.prefs.defaults = clone(chat.settings);
+    if (fit) { cs.num_ctx = fit; renderTune(); afterSettingsChange(); }
+  } else if (id === 'role-save') {
+    if (!cs.system.trim()) { toast('Write some role text first.'); return; }
+    const cur = allPresets().find((p) => p.id === cs.presetId);
+    const name = await modal({ title: 'Save as my role', body: 'Give this role a short name. It will appear in the Role list for every chat.', okText: 'Save', input: { placeholder: 'e.g. My master prompt', value: cur && cur.custom ? cur.name : '' } });
+    if (!name || !name.trim()) return;
+    S.prefs.customPresets = S.prefs.customPresets || [];
+    const existing = S.prefs.customPresets.find((p) => p.name.toLowerCase() === name.trim().toLowerCase());
+    if (existing) existing.system = cs.system;
+    else S.prefs.customPresets.push({ id: `my-${uid()}`, name: name.trim().slice(0, 60), system: cs.system });
+    cs.presetId = (existing || S.prefs.customPresets[S.prefs.customPresets.length - 1]).id;
+    renderTune(); persist();
+    toast(S.mode === 'vault' ? 'Role saved in your vault.' : 'Role saved for this session. Create a vault to keep roles between launches.', 'ok');
+  } else if (id === 'role-del') {
+    const p = (S.prefs.customPresets || []).find((x) => x.id === cs.presetId);
+    if (!p || !await modal({ title: `Delete the role "${p.name}"?`, okText: 'Delete', danger: true })) return;
+    S.prefs.customPresets = S.prefs.customPresets.filter((x) => x.id !== p.id);
+    cs.presetId = '';
+    renderTune(); persist();
+  } else if (id === 'profile-save') {
+    S.prefs.modelProfiles = S.prefs.modelProfiles || {};
+    const prof = {};
+    for (const k of MODEL_KEYS) prof[k] = cs[k];
+    S.prefs.modelProfiles[chat.model] = prof;
+    renderTune(); persist();
+    toast(`Saved. New chats with ${chat.model} will start like this.`, 'ok');
+  } else if (id === 'profile-forget') {
+    delete S.prefs.modelProfiles[chat.model];
+    renderTune(); persist();
+  } else if (id === 'save-defaults') {
+    S.prefs.defaults = clone(cs);
     S.prefs.defaultModel = chat.model;
     persist();
-    toast(S.mode === 'vault' ? 'Saved as defaults for new chats.' : 'Defaults set for this session (ephemeral sessions don\'t save settings).');
-  } else if (id === 'reset-chat' && chat) {
+    toast(S.mode === 'vault' ? 'Saved as defaults for new chats.' : "Defaults set for this session (ephemeral sessions don't save settings).");
+  } else if (id === 'reset-chat') {
     chat.settings = clone(DEFAULT_CHAT);
-    renderTune(); renderGauge(); renderCtxBar(); persist();
+    applyModelProfile(chat);
+    renderTune(); afterSettingsChange();
   } else if (id === 'url-save') {
     try {
       const url = await Backend.setUrl($('#ollama-url').value);
@@ -1277,15 +1546,14 @@ function bind() {
   $('#mem-gauge').onclick = () => toggleTune(true);
   $('#tune-close').onclick = () => toggleTune(false);
   $('#tune-body').addEventListener('input', onTuneInput);
-  $('#tune-body').addEventListener('change', (e) => { if (e.target.type === 'checkbox' || e.target.tagName === 'SELECT') onTuneInput(e); });
   $('#tune-body').addEventListener('click', onTuneClick);
 
   $('#model-select').onchange = async (e) => {
     const chat = activeChat() || newChat();
     chat.model = e.target.value;
-    const max = maxCtxFor(chat.model);
     await ensureInfo(chat.model);
-    if (chat.settings.num_ctx > maxCtxFor(chat.model)) chat.settings.num_ctx = maxCtxFor(chat.model) || max;
+    if (applyModelProfile(chat)) toast(`Using your saved settings for ${chat.model}.`);
+    if (chat.settings.num_ctx > maxCtxFor(chat.model)) chat.settings.num_ctx = maxCtxFor(chat.model);
     renderTopbar(); renderAttachments(); renderCtxBar();
     if (!$('#tune').hidden) renderTune();
     persist();
@@ -1331,6 +1599,16 @@ function bind() {
     }
   }, true);
   box.addEventListener('click', async (e) => {
+    const rc = e.target.closest('[data-role]');
+    if (rc) {
+      const chat = activeChat() || newChat();
+      if (chat.settings.presetId === rc.dataset.role) { chat.settings.presetId = ''; chat.settings.system = ''; chat.settings.temperature = null; }
+      else applyPreset(chat, rc.dataset.role);
+      renderMessages(false); renderCtxBar(); renderGauge();
+      if (!$('#tune').hidden) renderTune();
+      persist();
+      return;
+    }
     const cc = e.target.closest('.copy-code');
     if (cc) { copyText($('pre', cc.closest('.code')).textContent); return; }
     const b = e.target.closest('[data-act]');
@@ -1408,13 +1686,35 @@ function bind() {
 let ctxTimer = null;
 function renderCtxBarSoon() { clearTimeout(ctxTimer); ctxTimer = setTimeout(renderCtxBar, 150); }
 
+let pollCount = 0;
 async function poll() {
   if (document.hidden) return;
-  await Promise.all([refreshGpu(), refreshPs()]);
+  pollCount++;
+  // The Windows shared-memory counter is slower to read, so check it less often
+  // unless a model is loaded (that's when overflow happens).
+  const wantShared = S.ps.length || S.gen || pollCount % 4 === 1;
+  await Promise.all([refreshGpu(), refreshPs(), wantShared ? refreshShared() : null]);
   if (S.mode) {
     renderGauge();
+    renderHardware();
     if (!$('#tune').hidden) renderMemCard();
   }
+}
+
+function renderHardware() {
+  const el = $('#hw');
+  const g = S.gpu[0];
+  if (!g) { el.innerHTML = ''; return; }
+  const used = g.used_mb / 1024;
+  const total = g.total_mb / 1024;
+  const pct = Math.min(100, (used / total) * 100);
+  const over = overflowGB();
+  const name = g.name.replace(/^NVIDIA\s+/i, '').replace(/^GeForce\s+/i, '');
+  el.innerHTML = `<div class="hw-row"><span>${esc(name)}</span><span>${used.toFixed(1)} / ${total.toFixed(1)} GB</span></div>` +
+    `<div class="hw-bar"><span style="width:${pct}%" class="${pct > 95 ? 'hot' : ''}"></span></div>` +
+    `<div class="hw-row dim"><span>${g.util_pct !== null && g.util_pct !== undefined ? `${g.util_pct}% busy` : ''}${g.temp_c ? ` · ${g.temp_c}°C` : ''}</span>` +
+    `<span>${S.ps.length ? `${esc(S.ps.map((p) => p.name).join(', '))} loaded` : 'no model loaded'}</span></div>` +
+    (over > 1 ? `<div class="hw-row bad">⚠ ${over.toFixed(1)} GB overflowed into RAM</div>` : '');
 }
 
 function autoLockTick() {
